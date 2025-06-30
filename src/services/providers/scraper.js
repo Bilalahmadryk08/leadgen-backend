@@ -353,19 +353,67 @@ const scrapeWebsite = async (driver, url, category) => {
 export const scrapeLeadsWithSelenium = async (prompt) => {
   console.log(`\n🔍 SCRAPER STARTED - Prompt: "${prompt}"`);
 
+  // Detect if we're running in production (Render) or locally
+  const isProduction = process.env.NODE_ENV === 'production' || process.env.RENDER;
+  let tmpDir = null;
+
   try {
     const { count, category, location } = parsePrompt(prompt);
     console.log(`🎯 Target: ${count} ${category} in ${location}`);
 
     console.log(`🚀 Setting up Chrome options...`);
     const options = new chrome.Options();
-    options.addArguments('--no-sandbox');
-    options.addArguments('--disable-dev-shm-usage');
-    // Do NOT add --headless so CAPTCHA can be solved manually
+
+    if (isProduction) {
+      console.log(`🌐 Production environment detected - using headless mode`);
+      // Production settings for Render/cloud environments
+      options.addArguments('--headless=new'); // Use new headless mode
+      options.addArguments('--no-sandbox');
+      options.addArguments('--disable-dev-shm-usage');
+      options.addArguments('--disable-gpu');
+      options.addArguments('--disable-web-security');
+      options.addArguments('--disable-features=VizDisplayCompositor');
+      options.addArguments('--disable-extensions');
+      options.addArguments('--disable-plugins');
+      options.addArguments('--disable-images');
+      options.addArguments('--disable-javascript');
+      options.addArguments('--disable-default-apps');
+      options.addArguments('--disable-background-timer-throttling');
+      options.addArguments('--disable-backgrounding-occluded-windows');
+      options.addArguments('--disable-renderer-backgrounding');
+      options.addArguments('--disable-background-networking');
+      options.addArguments('--remote-debugging-port=9222');
+      options.addArguments('--window-size=1920,1080');
+      options.addArguments('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+
+      // Use a unique temporary directory for user data
+      tmpDir = `/tmp/chrome-user-data-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
+      options.addArguments(`--user-data-dir=${tmpDir}`);
+      options.addArguments('--single-process'); // Important for containerized environments
+      options.addArguments('--no-zygote'); // Important for containerized environments
+    } else {
+      console.log(`💻 Local environment detected - using visible browser`);
+      // Local development settings
+      options.addArguments('--no-sandbox');
+      options.addArguments('--disable-dev-shm-usage');
+      options.addArguments('--window-size=1920,1080');
+      // Do NOT add --headless so CAPTCHA can be solved manually in local development
+    }
 
     console.log(`🚀 Building Chrome driver...`);
-    const driver = await new Builder().forBrowser('chrome').setChromeOptions(options).build();
-    console.log(`✅ Chrome driver created successfully`);
+    let driver;
+    try {
+      driver = await new Builder().forBrowser('chrome').setChromeOptions(options).build();
+      console.log(`✅ Chrome driver created successfully`);
+    } catch (driverError) {
+      console.error(`❌ Failed to create Chrome driver: ${driverError.message}`);
+      if (isProduction) {
+        console.error(`💡 This might be because Chrome is not installed on the server.`);
+        console.error(`💡 Make sure your Render service has Chrome/Chromium installed.`);
+        console.error(`💡 You may need to add a build script to install Chrome.`);
+      }
+      throw new Error(`Chrome driver initialization failed: ${driverError.message}`);
+    }
 
     const leads = [];
 
@@ -599,6 +647,19 @@ export const scrapeLeadsWithSelenium = async (prompt) => {
           console.log('🛑 Chrome browser closed');
         } catch (e) {
           console.error(`❌ Error closing driver: ${e.message}`);
+        }
+      }
+
+      // Clean up temporary directory in production
+      if (isProduction && tmpDir) {
+        try {
+          const fs = await import('fs');
+          if (fs.existsSync && fs.existsSync(tmpDir)) {
+            fs.rmSync(tmpDir, { recursive: true, force: true });
+            console.log(`🧹 Cleaned up temporary directory: ${tmpDir}`);
+          }
+        } catch (e) {
+          console.log(`⚠️ Could not clean up temporary directory: ${e.message}`);
         }
       }
     }
