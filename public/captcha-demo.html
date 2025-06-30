@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lead Generation with CAPTCHA</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .container {
+            background: white;
+            border-radius: 8px;
+            padding: 30px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+            color: #333;
+        }
+        input, select, textarea {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 16px;
+        }
+        button {
+            background: #4CAF50;
+            color: white;
+            padding: 12px 24px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            margin-right: 10px;
+        }
+        button:hover {
+            background: #45a049;
+        }
+        button:disabled {
+            background: #cccccc;
+            cursor: not-allowed;
+        }
+        .status {
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 4px;
+            font-weight: bold;
+        }
+        .status.info {
+            background: #e3f2fd;
+            border: 1px solid #2196f3;
+            color: #1976d2;
+        }
+        .status.success {
+            background: #e8f5e8;
+            border: 1px solid #4caf50;
+            color: #2e7d32;
+        }
+        .status.error {
+            background: #ffebee;
+            border: 1px solid #f44336;
+            color: #c62828;
+        }
+        .captcha-container {
+            margin-top: 20px;
+            border: 2px solid #2196f3;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        .captcha-header {
+            background: #2196f3;
+            color: white;
+            padding: 15px;
+            text-align: center;
+            font-weight: bold;
+        }
+        .captcha-iframe {
+            width: 100%;
+            height: 600px;
+            border: none;
+            display: block;
+        }
+        .results {
+            margin-top: 30px;
+        }
+        .lead-item {
+            background: #f9f9f9;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 15px;
+            margin-bottom: 10px;
+        }
+        .lead-item h4 {
+            margin: 0 0 10px 0;
+            color: #333;
+        }
+        .lead-item p {
+            margin: 5px 0;
+            color: #666;
+        }
+        .hidden {
+            display: none;
+        }
+        .progress-container {
+            margin: 20px 0;
+            padding: 20px;
+            background: #f0f8ff;
+            border: 2px solid #4CAF50;
+            border-radius: 8px;
+            text-align: center;
+        }
+        .progress-bar {
+            width: 100%;
+            height: 20px;
+            background: #e0e0e0;
+            border-radius: 10px;
+            overflow: hidden;
+            margin: 15px 0;
+        }
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #4CAF50, #45a049);
+            width: 0%;
+            transition: width 0.3s ease;
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.7; }
+            100% { opacity: 1; }
+        }
+        .progress-steps {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 15px;
+            font-size: 14px;
+        }
+        .step {
+            padding: 5px 10px;
+            border-radius: 15px;
+            background: #e0e0e0;
+            color: #666;
+            transition: all 0.3s ease;
+        }
+        .step.active {
+            background: #4CAF50;
+            color: white;
+        }
+        .step.completed {
+            background: #2e7d32;
+            color: white;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 Lead Generation with CAPTCHA Handling</h1>
+        <p>This demo shows how to handle CAPTCHA verification within your application using iframes.</p>
+        
+        <form id="leadForm">
+            <div class="form-group">
+                <label for="prompt">Search Prompt:</label>
+                <input type="text" id="prompt" name="prompt" 
+                       placeholder="e.g., generate 10 leads of restaurants in New York" 
+                       value="generate 5 leads of restaurants in New York">
+            </div>
+            
+            <div class="form-group">
+                <label for="source">Lead Source:</label>
+                <select id="source" name="source">
+                    <option value="scraper">Web Scraper (with CAPTCHA handling)</option>
+                    <option value="apify">Apify</option>
+                    <option value="apollo">Apollo</option>
+                </select>
+            </div>
+            
+            <div class="form-group">
+                <label for="maxResults">Max Results:</label>
+                <input type="number" id="maxResults" name="maxResults" value="10" min="1" max="100">
+            </div>
+            
+            <button type="submit" id="generateBtn">🔍 Generate Leads</button>
+            <button type="button" id="clearBtn">🗑️ Clear Results</button>
+        </form>
+        
+        <div id="status" class="status hidden"></div>
+        
+        <!-- CAPTCHA Container -->
+        <div id="captchaContainer" class="captcha-container hidden">
+            <div class="captcha-header">
+                🔐 CAPTCHA Verification Required
+                <div style="font-size: 14px; font-weight: normal; margin-top: 5px;">
+                    Please solve the CAPTCHA below to continue with lead generation
+                </div>
+            </div>
+            <iframe id="captchaIframe" class="captcha-iframe" src=""></iframe>
+        </div>
+
+        <!-- Progress Container -->
+        <div id="progressContainer" class="progress-container hidden">
+            <h3>🚀 Generating Your Leads</h3>
+            <p>Please wait while we search and extract lead information...</p>
+
+            <div class="progress-bar">
+                <div id="progressFill" class="progress-fill"></div>
+            </div>
+
+            <div class="progress-steps">
+                <div id="step1" class="step">🔍 Searching</div>
+                <div id="step2" class="step">📊 Extracting Data</div>
+                <div id="step3" class="step">✅ Processing Results</div>
+            </div>
+
+            <p id="progressText">Initializing search...</p>
+        </div>
+        
+        <!-- Results Container -->
+        <div id="results" class="results hidden">
+            <h2>📊 Generated Leads</h2>
+            <div id="leadsList"></div>
+        </div>
+    </div>
+
+    <script>
+        let currentSessionId = null;
+        let statusCheckInterval = null;
+
+        const form = document.getElementById('leadForm');
+        const generateBtn = document.getElementById('generateBtn');
+        const clearBtn = document.getElementById('clearBtn');
+        const status = document.getElementById('status');
+        const captchaContainer = document.getElementById('captchaContainer');
+        const captchaIframe = document.getElementById('captchaIframe');
+        const results = document.getElementById('results');
+        const leadsList = document.getElementById('leadsList');
+
+        // Form submission
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            await generateLeads();
+        });
+
+        // Clear results
+        clearBtn.addEventListener('click', () => {
+            clearResults();
+        });
+
+        // Listen for messages from CAPTCHA iframe
+        window.addEventListener('message', (event) => {
+            if (event.data.type === 'captcha-resolved') {
+                console.log('CAPTCHA resolved:', event.data.sessionId);
+                showStatus('✅ CAPTCHA solved successfully! Now generating your leads...', 'success');
+                hideCaptcha();
+                showLeadGenerationProgress();
+                continueLeadGeneration(event.data.sessionId);
+            } else if (event.data.type === 'close-captcha') {
+                hideCaptcha();
+            }
+        });
+
+        async function generateLeads() {
+            const formData = new FormData(form);
+            const data = {
+                prompt: formData.get('prompt'),
+                source: formData.get('source'),
+                maxResults: parseInt(formData.get('maxResults')),
+                sessionId: currentSessionId
+            };
+
+            generateBtn.disabled = true;
+            showStatus('🔄 Generating leads...', 'info');
+            clearResults();
+
+            try {
+                const response = await fetch('/api/leads', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(data)
+                });
+
+                const result = await response.json();
+
+                if (response.status === 202 && result.requiresCaptcha) {
+                    // CAPTCHA required
+                    currentSessionId = result.sessionId;
+                    showStatus('🛡️ Security verification required. Please solve the CAPTCHA below to continue.', 'info');
+                    showCaptcha(result.captchaUrl);
+                    startStatusCheck(result.sessionId);
+                } else if (response.ok) {
+                    // Success
+                    showStatus(`✅ Successfully generated ${result.leads.length} leads!`, 'success');
+                    displayLeads(result.leads);
+                    currentSessionId = null;
+                } else {
+                    // Error
+                    showStatus(`❌ Error: ${result.error || 'Unknown error'}`, 'error');
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                showStatus(`❌ Network error: ${error.message}`, 'error');
+            } finally {
+                generateBtn.disabled = false;
+            }
+        }
+
+        async function continueLeadGeneration(sessionId) {
+            const formData = new FormData(form);
+            const data = {
+                prompt: formData.get('prompt'),
+                source: formData.get('source'),
+                maxResults: parseInt(formData.get('maxResults')),
+                sessionId: sessionId
+            };
+
+            // Show progress indicator
+            showStatus('🔄 Generating leads... This may take a few moments.', 'info');
+
+            try {
+                const response = await fetch('/api/leads', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(data)
+                });
+
+                const result = await response.json();
+
+                if (response.ok) {
+                    hideLeadGenerationProgress();
+                    showStatus(`🎉 Success! Generated ${result.leads.length} leads in ${result.meta.duration}s`, 'success');
+                    displayLeads(result.leads);
+                } else {
+                    hideLeadGenerationProgress();
+                    showStatus(`❌ Error: ${result.error || 'Unknown error'}`, 'error');
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                hideLeadGenerationProgress();
+                showStatus(`❌ Network error: ${error.message}`, 'error');
+            }
+
+            currentSessionId = null;
+            stopStatusCheck();
+        }
+
+        function showCaptcha(captchaUrl) {
+            captchaIframe.src = captchaUrl;
+            captchaContainer.classList.remove('hidden');
+        }
+
+        function hideCaptcha() {
+            captchaContainer.classList.add('hidden');
+            captchaIframe.src = '';
+        }
+
+        function startStatusCheck(sessionId) {
+            stopStatusCheck(); // Clear any existing interval
+            
+            statusCheckInterval = setInterval(async () => {
+                try {
+                    const response = await fetch(`/api/captcha/status/${sessionId}`);
+                    const result = await response.json();
+                    
+                    if (result.resolved) {
+                        showStatus('✅ CAPTCHA resolved! Continuing with lead generation...', 'success');
+                        hideCaptcha();
+                        continueLeadGeneration(sessionId);
+                    }
+                } catch (error) {
+                    console.error('Error checking CAPTCHA status:', error);
+                }
+            }, 3000); // Check every 3 seconds
+        }
+
+        function stopStatusCheck() {
+            if (statusCheckInterval) {
+                clearInterval(statusCheckInterval);
+                statusCheckInterval = null;
+            }
+        }
+
+        function showStatus(message, type) {
+            status.textContent = message;
+            status.className = `status ${type}`;
+            status.classList.remove('hidden');
+        }
+
+        function displayLeads(leads) {
+            leadsList.innerHTML = '';
+            
+            if (leads.length === 0) {
+                leadsList.innerHTML = '<p>No leads found.</p>';
+            } else {
+                leads.forEach((lead, index) => {
+                    const leadDiv = document.createElement('div');
+                    leadDiv.className = 'lead-item';
+                    leadDiv.innerHTML = `
+                        <h4>🏢 ${lead.name || 'Business Name Not Available'}</h4>
+                        <p><strong>📞 Phone:</strong> ${lead.phone || 'Not available'}</p>
+                        <p><strong>📧 Email:</strong> ${lead.email || 'Not available'}</p>
+                        <p><strong>🌐 Website:</strong> ${lead.website || 'Not available'}</p>
+                        <p><strong>📍 Address:</strong> ${lead.address || 'Not available'}</p>
+                        <p><strong>🔍 Source:</strong> ${lead.source || 'Unknown'}</p>
+                    `;
+                    leadsList.appendChild(leadDiv);
+                });
+            }
+            
+            results.classList.remove('hidden');
+        }
+
+        function showLeadGenerationProgress() {
+            const progressContainer = document.getElementById('progressContainer');
+            const progressFill = document.getElementById('progressFill');
+            const progressText = document.getElementById('progressText');
+            const step1 = document.getElementById('step1');
+            const step2 = document.getElementById('step2');
+            const step3 = document.getElementById('step3');
+
+            progressContainer.classList.remove('hidden');
+
+            // Reset all steps
+            [step1, step2, step3].forEach(step => {
+                step.classList.remove('active', 'completed');
+            });
+
+            // Simulate progress steps
+            let progress = 0;
+            const progressInterval = setInterval(() => {
+                progress += Math.random() * 15 + 5; // Random progress between 5-20%
+
+                if (progress >= 100) {
+                    progress = 100;
+                    clearInterval(progressInterval);
+                }
+
+                progressFill.style.width = progress + '%';
+
+                // Update steps and text based on progress
+                if (progress < 30) {
+                    step1.classList.add('active');
+                    progressText.textContent = 'Searching for businesses...';
+                } else if (progress < 70) {
+                    step1.classList.remove('active');
+                    step1.classList.add('completed');
+                    step2.classList.add('active');
+                    progressText.textContent = 'Extracting contact information...';
+                } else {
+                    step2.classList.remove('active');
+                    step2.classList.add('completed');
+                    step3.classList.add('active');
+                    progressText.textContent = 'Processing and validating results...';
+                }
+            }, 800);
+
+            // Store interval for cleanup
+            window.progressInterval = progressInterval;
+        }
+
+        function hideLeadGenerationProgress() {
+            const progressContainer = document.getElementById('progressContainer');
+            progressContainer.classList.add('hidden');
+
+            // Clear progress interval if it exists
+            if (window.progressInterval) {
+                clearInterval(window.progressInterval);
+                window.progressInterval = null;
+            }
+        }
+
+        function clearResults() {
+            results.classList.add('hidden');
+            leadsList.innerHTML = '';
+            status.classList.add('hidden');
+            hideCaptcha();
+            hideLeadGenerationProgress();
+            stopStatusCheck();
+            currentSessionId = null;
+        }
+    </script>
+</body>
+</html>

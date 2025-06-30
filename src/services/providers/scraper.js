@@ -2,6 +2,7 @@
 import { Builder, By } from 'selenium-webdriver';
 import chrome from 'selenium-webdriver/chrome.js';
 import 'chromedriver';
+import { captchaSessions } from '../../controllers/captchaController.js';
 
 const delay = (ms) => new Promise(res => setTimeout(res, ms));
 
@@ -350,6 +351,51 @@ const scrapeWebsite = async (driver, url, category) => {
   }
 };
 
+// New function to scrape with CAPTCHA session
+export const scrapeLeadsWithCaptchaSession = async (prompt, sessionId = null) => {
+  console.log(`\n🔍 SCRAPER WITH CAPTCHA SESSION - Prompt: "${prompt}"`);
+  console.log(`🔐 Session ID: ${sessionId || 'none - will create new'}`);
+
+  // If sessionId provided, try to use existing session
+  if (sessionId && captchaSessions.has(sessionId)) {
+    const session = captchaSessions.get(sessionId);
+
+    if (session.resolved) {
+      console.log(`✅ Using resolved CAPTCHA session: ${sessionId}`);
+      return await continueScrapingWithDriver(session.driver, prompt);
+    } else {
+      console.log(`⚠️ CAPTCHA session not resolved yet: ${sessionId}`);
+      return {
+        error: 'CAPTCHA not resolved',
+        sessionId,
+        requiresCaptcha: true
+      };
+    }
+  }
+
+  // Fall back to regular scraping
+  return await scrapeLeadsWithSelenium(prompt);
+};
+
+// Helper function to continue scraping with existing driver
+const continueScrapingWithDriver = async (driver, prompt) => {
+  try {
+    const { count, category, location } = parsePrompt(prompt);
+    console.log(`🎯 Continuing scrape: ${count} ${category} in ${location}`);
+
+    // Continue with the existing scraping logic using the provided driver
+    // (This would contain the main scraping logic from the original function)
+
+    const leads = [];
+    // ... scraping logic here ...
+
+    return leads;
+  } catch (error) {
+    console.error(`❌ Error in continueScrapingWithDriver:`, error);
+    return [];
+  }
+};
+
 export const scrapeLeadsWithSelenium = async (prompt) => {
   console.log(`\n🔍 SCRAPER STARTED - Prompt: "${prompt}"`);
 
@@ -376,7 +422,6 @@ export const scrapeLeadsWithSelenium = async (prompt) => {
       options.addArguments('--disable-extensions');
       options.addArguments('--disable-plugins');
       options.addArguments('--disable-images');
-      options.addArguments('--disable-javascript');
       options.addArguments('--disable-default-apps');
       options.addArguments('--disable-background-timer-throttling');
       options.addArguments('--disable-backgrounding-occluded-windows');
@@ -384,7 +429,16 @@ export const scrapeLeadsWithSelenium = async (prompt) => {
       options.addArguments('--disable-background-networking');
       options.addArguments('--remote-debugging-port=9222');
       options.addArguments('--window-size=1920,1080');
+
+      // Anti-detection measures to reduce CAPTCHA likelihood
       options.addArguments('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+      options.addArguments('--accept-lang=en-US,en;q=0.9');
+      options.addArguments('--disable-blink-features=AutomationControlled');
+      options.addArguments('--disable-automation');
+      options.addArguments('--disable-infobars');
+      options.addArguments('--disable-notifications');
+      options.addArguments('--disable-popup-blocking');
+      options.addArguments('--disable-save-password-bubble');
 
       // Use a unique temporary directory for user data
       tmpDir = `/tmp/chrome-user-data-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
@@ -418,82 +472,155 @@ export const scrapeLeadsWithSelenium = async (prompt) => {
     const leads = [];
 
     try {
-      const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(`${category} ${location} contact phone number`)}`;
-      console.log(`🔍 Searching: ${searchUrl}`);
-      await driver.get(searchUrl);
+      // Different approach for production vs local
+      if (isProduction) {
+        console.log("🌐 Production mode: Using alternative search approach to avoid CAPTCHA");
 
-      // Auto-detect CAPTCHA completion
-      console.log("🛑 Checking for CAPTCHA and waiting for search results...");
+        // Try multiple search strategies to avoid CAPTCHA
+        const searchStrategies = [
+          // Strategy 1: Direct business directory search
+          `https://www.yelp.com/search?find_desc=${encodeURIComponent(category)}&find_loc=${encodeURIComponent(location)}`,
+          // Strategy 2: Yellow Pages
+          `https://www.yellowpages.com/search?search_terms=${encodeURIComponent(category)}&geo_location_terms=${encodeURIComponent(location)}`,
+          // Strategy 3: Google with different parameters to reduce CAPTCHA likelihood
+          `https://www.google.com/search?q=${encodeURIComponent(`"${category}" "${location}" site:yellowpages.com OR site:yelp.com`)}&num=20`
+        ];
 
-      let captchaResolved = false;
-      let attempts = 0;
-      const maxAttempts = 60; // Wait up to 60 seconds (60 * 1 second intervals)
+        let searchUrl = searchStrategies[2]; // Start with Google but with specific sites
+        console.log(`🔍 Production Search: ${searchUrl}`);
+        await driver.get(searchUrl);
 
-      while (!captchaResolved && attempts < maxAttempts) {
-        attempts++;
+        // Quick CAPTCHA check in production
+        await delay(3000);
+        const captchaCheck = await driver.findElements(By.css('[id*="captcha"], [class*="captcha"], [id*="recaptcha"]'));
 
-        try {
-          // Check if we're still on a CAPTCHA page or if search results are loaded
-          const currentUrl = await driver.getCurrentUrl();
+        if (captchaCheck.length > 0) {
+          console.log("⚠️ CAPTCHA detected in production - trying alternative approaches");
 
-          console.log(`⏳ Attempt ${attempts}/${maxAttempts} - Current URL: ${currentUrl.substring(0, 100)}...`);
+          // Try multiple fallback strategies
+          for (let i = 0; i < searchStrategies.length - 1; i++) {
+            try {
+              searchUrl = searchStrategies[i];
+              console.log(`🔄 Fallback ${i + 1}: ${searchUrl}`);
+              await driver.get(searchUrl);
+              await delay(3000);
 
-          // Check for CAPTCHA indicators
-          const captchaElements = await driver.findElements(By.css([
-            '[id*="captcha"]',
-            '[class*="captcha"]',
-            '[id*="recaptcha"]',
-            '[class*="recaptcha"]',
-            'iframe[src*="recaptcha"]'
-          ].join(', ')));
-
-          // Check for search result indicators
-          const searchResultElements = await driver.findElements(By.css([
-            'div[data-ved]', // Google search result containers
-            'div.g', // Google result divs
-            'h3', // Result titles
-            '#search' // Search results container
-          ].join(', ')));
-
-          // If we have search results and no visible CAPTCHA, we're good to go
-          if (searchResultElements.length > 0 && captchaElements.length === 0) {
-            console.log("✅ Search results detected - CAPTCHA appears to be resolved!");
-            captchaResolved = true;
-            break;
+              // Check if this source also has CAPTCHA
+              const fallbackCaptchaCheck = await driver.findElements(By.css('[id*="captcha"], [class*="captcha"], [id*="recaptcha"]'));
+              if (fallbackCaptchaCheck.length === 0) {
+                console.log(`✅ Successfully switched to alternative source`);
+                break;
+              } else {
+                console.log(`⚠️ CAPTCHA also present on fallback source ${i + 1}`);
+              }
+            } catch (e) {
+              console.log(`❌ Error with fallback ${i + 1}: ${e.message}`);
+            }
           }
 
-          // If we still see CAPTCHA elements, keep waiting
-          if (captchaElements.length > 0) {
-            console.log("🔄 CAPTCHA still present, please solve it...");
-          } else if (searchResultElements.length === 0) {
-            console.log("🔄 Waiting for search results to appear...");
+          // Final check - if all sources have CAPTCHA, return error
+          const finalCaptchaCheck = await driver.findElements(By.css('[id*="captcha"], [class*="captcha"], [id*="recaptcha"]'));
+          if (finalCaptchaCheck.length > 0) {
+            console.log("❌ All sources require CAPTCHA in production mode");
+            console.log("💡 This is a temporary issue. Please try again later or use local development mode.");
+            return [];
           }
-
-        } catch (e) {
-          console.log(`⚠️ Error checking page state: ${e.message}`);
         }
 
-        await delay(1000); // Wait 1 second before next check
-      }
+      } else {
+        // Local development - original Google search with manual CAPTCHA solving
+        const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(`${category} ${location} contact phone number`)}`;
+        console.log(`🔍 Local Search: ${searchUrl}`);
+        await driver.get(searchUrl);
 
-      if (!captchaResolved) {
-        console.log("❌ Timeout waiting for CAPTCHA resolution or search results");
-        console.log("💡 Please ensure CAPTCHA is solved and search results are visible");
-        return [];
+        // Auto-detect CAPTCHA completion in local mode
+        console.log("🛑 Checking for CAPTCHA and waiting for search results...");
+
+        let captchaResolved = false;
+        let attempts = 0;
+        const maxAttempts = 60; // Wait up to 60 seconds
+
+        while (!captchaResolved && attempts < maxAttempts) {
+          attempts++;
+
+          try {
+            const currentUrl = await driver.getCurrentUrl();
+            console.log(`⏳ Attempt ${attempts}/${maxAttempts} - Current URL: ${currentUrl.substring(0, 100)}...`);
+
+            // Check for CAPTCHA indicators
+            const captchaElements = await driver.findElements(By.css([
+              '[id*="captcha"]',
+              '[class*="captcha"]',
+              '[id*="recaptcha"]',
+              '[class*="recaptcha"]',
+              'iframe[src*="recaptcha"]'
+            ].join(', ')));
+
+            // Check for search result indicators
+            const searchResultElements = await driver.findElements(By.css([
+              'div[data-ved]',
+              'div.g',
+              'h3',
+              '#search'
+            ].join(', ')));
+
+            if (searchResultElements.length > 0 && captchaElements.length === 0) {
+              console.log("✅ Search results detected - CAPTCHA resolved!");
+              captchaResolved = true;
+              break;
+            }
+
+            if (captchaElements.length > 0) {
+              console.log("🔄 CAPTCHA present - please solve it manually...");
+            } else if (searchResultElements.length === 0) {
+              console.log("🔄 Waiting for search results...");
+            }
+
+          } catch (e) {
+            console.log(`⚠️ Error checking page state: ${e.message}`);
+          }
+
+          await delay(1000);
+        }
+
+        if (!captchaResolved) {
+          console.log("❌ Timeout waiting for CAPTCHA resolution");
+          return [];
+        }
       }
 
       // Additional wait for page to fully stabilize
       console.log("⏳ Waiting for search results to fully load...");
       await delay(2000);
 
-      // Try multiple selectors for Google search results
+      // Detect which site we're on and use appropriate selectors
+      const currentUrl = await driver.getCurrentUrl();
       let resultEls = [];
-      const selectors = [
-        'div[data-ved] a[href^="http"]:not([href*="google.com"])', // Main search results
-        'h3 a[href^="http"]:not([href*="google.com"])', // Title links
-        'a[href^="http"]:not([href*="google.com"]):not([href*="youtube.com"]):not([href*="facebook.com"])', // General links excluding social media
-        'div.g a[href^="http"]' // Google result container links
-      ];
+      let selectors = [];
+
+      if (currentUrl.includes('yelp.com')) {
+        console.log("🟡 Detected Yelp - using Yelp-specific selectors");
+        selectors = [
+          'a[href*="/biz/"]', // Yelp business links
+          '.businessName a', // Business name links
+          '[data-testid="serp-ia-card"] a' // Yelp search result cards
+        ];
+      } else if (currentUrl.includes('yellowpages.com')) {
+        console.log("🟨 Detected Yellow Pages - using YP-specific selectors");
+        selectors = [
+          '.result .business-name a', // YP business links
+          '.info h3 a', // YP result titles
+          'a[href*="/business/"]' // YP business page links
+        ];
+      } else {
+        console.log("🔍 Using Google search selectors");
+        selectors = [
+          'div[data-ved] a[href^="http"]:not([href*="google.com"])', // Main search results
+          'h3 a[href^="http"]:not([href*="google.com"])', // Title links
+          'a[href^="http"]:not([href*="google.com"]):not([href*="youtube.com"]):not([href*="facebook.com"])', // General links excluding social media
+          'div.g a[href^="http"]' // Google result container links
+        ];
+      }
 
       for (const selector of selectors) {
         try {

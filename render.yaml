@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: leadgen-backend
+    env: node
+    buildCommand: ./build.sh
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: APIFY_TOKEN
+        sync: false
+      - key: RAPIDAPI_KEY
+        sync: false
+      - key: RENDER
+        value: true

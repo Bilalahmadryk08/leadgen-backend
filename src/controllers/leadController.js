@@ -1,7 +1,7 @@
 import { fetchLeads } from '../services/leadFetcher.js';
 import { fetchLeadsFromApify } from '../services/providers/apify.js';
 import { fetchLeadsFromApollo } from '../services/providers/apollo.js';
-import { scrapeLeadsWithSelenium } from '../services/providers/scraper.js';
+import { scrapeLeadsWithSelenium, scrapeLeadsWithCaptchaSession } from '../services/providers/scraper.js';
 
 export const generateLeads = async (req, res) => {
   console.log(`\n🚀 ===== LEAD CONTROLLER DEBUG =====`);
@@ -12,12 +12,13 @@ export const generateLeads = async (req, res) => {
   console.log(`📦 Request body:`, JSON.stringify(req.body, null, 2));
 
   try {
-    const { prompt, source, maxResults } = req.body;
+    const { prompt, source, maxResults, sessionId } = req.body;
 
     console.log(`\n📥 PARSED REQUEST DATA:`);
     console.log(`   🎯 Source: "${source}"`);
     console.log(`   💬 Prompt: "${prompt}"`);
     console.log(`   📊 Max Results: ${maxResults || 'not specified'}`);
+    console.log(`   🔐 Session ID: ${sessionId || 'none'}`);
     console.log(`   ⏰ Timestamp: ${new Date().toISOString()}`);
 
     if (!prompt || !source) {
@@ -46,7 +47,26 @@ export const generateLeads = async (req, res) => {
 
       try {
         console.log(`🚀 CALLING SCRAPER FUNCTION...`);
-        leads = await scrapeLeadsWithSelenium(prompt);
+
+        // Use CAPTCHA session if provided
+        if (sessionId) {
+          console.log(`🔐 Using CAPTCHA session: ${sessionId}`);
+          leads = await scrapeLeadsWithCaptchaSession(prompt, sessionId);
+        } else {
+          leads = await scrapeLeadsWithSelenium(prompt);
+        }
+
+        // Check if CAPTCHA is required
+        if (leads && leads.requiresCaptcha) {
+          console.log(`🛡️ CAPTCHA required for scraping`);
+          return res.status(202).json({
+            requiresCaptcha: true,
+            sessionId: leads.sessionId,
+            message: 'CAPTCHA verification required',
+            captchaUrl: `/api/captcha/page/${leads.sessionId}`
+          });
+        }
+
         console.log(`\n✅ SCRAPER COMPLETED SUCCESSFULLY:`);
         console.log(`   📊 Leads returned: ${leads ? leads.length : 0}`);
         console.log(`   📋 Lead sample: ${leads && leads.length > 0 ? JSON.stringify(leads[0], null, 2) : 'No leads'}`);
