@@ -48,7 +48,7 @@ router.get('/google/callback', async (req, res) => {
     };
 
     // ✅ Redirect back to your frontend with complete auth data
-    const redirectUrl = `http://localhost:5173/google-auth-success?authData=${encodeURIComponent(JSON.stringify(authData))}`;
+    const redirectUrl = `{process.env.GOOGLE_REDIRECT_URI}/google-auth-success?authData=${encodeURIComponent(JSON.stringify(authData))}`;
     res.redirect(redirectUrl);
   } catch (err) {
     console.error('OAuth callback error:', err);

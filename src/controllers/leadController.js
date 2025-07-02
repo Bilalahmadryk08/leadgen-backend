@@ -149,7 +149,7 @@ export const generateLeadsStream = async (req, res) => {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
     'Connection': 'keep-alive',
-    'Access-Control-Allow-Origin': 'http://localhost:5173',
+    'Access-Control-Allow-Origin': `${process.env.Vite_CLIENT_URL}`,
     'Access-Control-Allow-Credentials': 'true'
   });
 
