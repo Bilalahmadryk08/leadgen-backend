@@ -11,18 +11,18 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-app.use(cors({
-  origin: [
-    process.env.Vite_CLIENT_URL
-  ],
-  credentials: true
-}));
+// app.use(cors({
+//   origin: [
+//     'http://localhost:5173'
+//   ],
+//   credentials: true
+// }));
+app.use(cors());
 app.use(express.json());
-app.use(express.static('public'));
 
 app.use("/api/leads", leadRoutes);
 app.use("/api/export", exportRoutes);
-app.use("/api/auth", authRoutes);
+app.use("/api/auth", authRoutes); // <-- updated usage
 app.use("/api/captcha", captchaRoutes);
 
 app.get("/", (req, res) => {

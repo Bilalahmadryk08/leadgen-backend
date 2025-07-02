@@ -1,6 +1,7 @@
 import express from 'express';
 import { google } from 'googleapis';
 import dotenv from 'dotenv';
+
 dotenv.config();
 
 const router = express.Router();
@@ -47,7 +48,7 @@ router.get('/google/callback', async (req, res) => {
     };
 
     // ✅ Redirect back to your frontend with complete auth data
-    const redirectUrl = `${process.env.Vite_CLIENT_URL}/google-auth-success?authData=${encodeURIComponent(JSON.stringify(authData))}`;
+    const redirectUrl = `http://localhost:5173/google-auth-success?authData=${encodeURIComponent(JSON.stringify(authData))}`;
     res.redirect(redirectUrl);
   } catch (err) {
     console.error('OAuth callback error:', err);

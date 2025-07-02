@@ -1,7 +1,7 @@
 import { fetchLeads } from '../services/leadFetcher.js';
 import { fetchLeadsFromApify } from '../services/providers/apify.js';
 import { fetchLeadsFromApollo } from '../services/providers/apollo.js';
-import { scrapeLeadsWithSelenium, scrapeLeadsWithCaptchaSession } from '../services/providers/scraper.js';
+import { scrapeLeadsWithSelenium } from '../services/providers/scraper.js';
 
 export const generateLeads = async (req, res) => {
   console.log(`\n🚀 ===== LEAD CONTROLLER DEBUG =====`);
@@ -12,13 +12,12 @@ export const generateLeads = async (req, res) => {
   console.log(`📦 Request body:`, JSON.stringify(req.body, null, 2));
 
   try {
-    const { prompt, source, maxResults, sessionId } = req.body;
+    const { prompt, source, maxResults } = req.body;
 
     console.log(`\n📥 PARSED REQUEST DATA:`);
     console.log(`   🎯 Source: "${source}"`);
     console.log(`   💬 Prompt: "${prompt}"`);
     console.log(`   📊 Max Results: ${maxResults || 'not specified'}`);
-    console.log(`   🔐 Session ID: ${sessionId || 'none'}`);
     console.log(`   ⏰ Timestamp: ${new Date().toISOString()}`);
 
     if (!prompt || !source) {
@@ -47,26 +46,20 @@ export const generateLeads = async (req, res) => {
 
       try {
         console.log(`🚀 CALLING SCRAPER FUNCTION...`);
-
-        // Use CAPTCHA session if provided
-        if (sessionId) {
-          console.log(`🔐 Using CAPTCHA session: ${sessionId}`);
-          leads = await scrapeLeadsWithCaptchaSession(prompt, sessionId);
-        } else {
-          leads = await scrapeLeadsWithSelenium(prompt);
-        }
+        const scraperResult = await scrapeLeadsWithSelenium(prompt);
 
         // Check if CAPTCHA is required
-        if (leads && leads.requiresCaptcha) {
-          console.log(`🛡️ CAPTCHA required for scraping`);
-          return res.status(202).json({
-            requiresCaptcha: true,
-            sessionId: leads.sessionId,
-            message: 'CAPTCHA verification required',
-            captchaUrl: `/api/captcha/page/${leads.sessionId}`
+        if (scraperResult && scraperResult.captchaRequired) {
+          console.log(`🔒 CAPTCHA required - returning CAPTCHA response`);
+          return res.json({
+            captchaRequired: true,
+            sessionId: scraperResult.sessionId,
+            siteKey: scraperResult.siteKey,
+            message: scraperResult.message
           });
         }
 
+        leads = scraperResult || [];
         console.log(`\n✅ SCRAPER COMPLETED SUCCESSFULLY:`);
         console.log(`   📊 Leads returned: ${leads ? leads.length : 0}`);
         console.log(`   📋 Lead sample: ${leads && leads.length > 0 ? JSON.stringify(leads[0], null, 2) : 'No leads'}`);
@@ -81,6 +74,22 @@ export const generateLeads = async (req, res) => {
         console.log(`\n❌ SCRAPER ERROR:`);
         console.log(`   🚨 Error message: ${scraperError.message}`);
         console.log(`   📚 Error stack: ${scraperError.stack}`);
+
+        // Check if this is a CAPTCHA error
+        try {
+          const errorData = JSON.parse(scraperError.message);
+          if (errorData.captchaRequired) {
+            console.log(`🔒 CAPTCHA required - returning CAPTCHA response`);
+            return res.json({
+              captchaRequired: true,
+              sessionId: errorData.sessionId,
+              siteKey: errorData.siteKey,
+              message: errorData.message
+            });
+          }
+        } catch (parseError) {
+          // Not a CAPTCHA error, continue with normal error handling
+        }
 
         // Return empty array instead of throwing
         leads = [];
@@ -129,5 +138,84 @@ export const scrapeLeads = async (req, res) => {
     console.error('Scrape failed:', error.message);
     return res.status(500).json({ error: 'Scraping failed' });
   }
+};
+
+// Streaming endpoint for real-time progress
+export const generateLeadsStream = async (req, res) => {
+  const { source, prompt, maxResults = 50 } = req.query;
+
+  // Set up Server-Sent Events
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'Access-Control-Allow-Origin': 'http://localhost:5173',
+    'Access-Control-Allow-Credentials': 'true'
+  });
+
+  const sendProgress = (type, data) => {
+    res.write(`data: ${JSON.stringify({ type, ...data })}\n\n`);
+  };
+
+  try {
+    sendProgress('progress', {
+      message: 'Starting lead generation...',
+      percent: 0,
+      leadsFound: 0
+    });
+
+    if (source === 'scraper') {
+      // Import scraper dynamically to avoid circular imports
+      const { scrapeLeads } = await import('../services/providers/scraper.js');
+
+      // Create a progress callback
+      const progressCallback = (progressData) => {
+        sendProgress('progress', progressData);
+      };
+
+      const scraperResult = await scrapeLeads(prompt, maxResults, progressCallback);
+
+      // Check if CAPTCHA is required
+      if (scraperResult && scraperResult.captchaRequired) {
+        sendProgress('captcha', scraperResult);
+        res.end();
+        return;
+      }
+
+      const leads = scraperResult.leads || scraperResult;
+      sendProgress('complete', { leads, count: leads.length });
+
+    } else {
+      // For other sources, simulate progress and use existing logic
+      sendProgress('progress', {
+        message: 'Processing request...',
+        percent: 50,
+        leadsFound: 0
+      });
+
+      let leads = [];
+      if (source === 'apify') {
+        const { fetchLeadsFromApify } = await import('../services/providers/apify.js');
+        leads = await fetchLeadsFromApify(prompt, maxResults);
+      } else if (source === 'apollo') {
+        const { fetchLeadsFromApollo } = await import('../services/providers/apollo.js');
+        leads = await fetchLeadsFromApollo(prompt, maxResults);
+      }
+
+      sendProgress('progress', {
+        message: 'Finalizing results...',
+        percent: 100,
+        leadsFound: leads.length
+      });
+
+      sendProgress('complete', { leads, count: leads.length });
+    }
+
+  } catch (error) {
+    console.error('❌ Streaming error:', error);
+    sendProgress('error', { message: error.message });
+  }
+
+  res.end();
 };
 

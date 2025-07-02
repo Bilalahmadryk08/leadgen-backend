@@ -2,9 +2,103 @@
 import { Builder, By } from 'selenium-webdriver';
 import chrome from 'selenium-webdriver/chrome.js';
 import 'chromedriver';
-import { captchaSessions } from '../../controllers/captchaController.js';
+import { createCaptchaSession, cleanupCaptchaSession } from '../../routes/captchaRoutes.js';
+import { v4 as uuidv4 } from 'uuid';
 
 const delay = (ms) => new Promise(res => setTimeout(res, ms));
+
+function extractNameFromURL(url) {
+  try {
+    let hostname = new URL(url).hostname;
+
+    // Remove common subdomains
+    hostname = hostname.replace(/^(www\.|get\.|app\.|portal\.|login\.)/i, '');
+
+    // Take first part of remaining hostname
+    let name = hostname.split('.')[0];
+
+    // Capitalize the first letter
+    name = name.charAt(0).toUpperCase() + name.slice(1);
+
+    return name;
+  } catch (e) {
+    console.error(`Error extracting name from URL: ${e.message}`);
+    return null;
+  }
+}
+
+// Track sessions that have solved CAPTCHA to enable headless mode
+export const captchaSolvedSessions = new Set();
+
+// Store active scraping sessions waiting for CAPTCHA resolution
+const pendingScrapingSessions = new Map();
+
+// Function to detect CAPTCHA and extract site key
+const detectCaptcha = async (driver) => {
+  try {
+    // Check for various CAPTCHA indicators
+    const captchaSelectors = [
+      '[id*="captcha"]',
+      '[class*="captcha"]',
+      '[id*="recaptcha"]',
+      '[class*="recaptcha"]',
+      'iframe[src*="recaptcha"]',
+      '.g-recaptcha',
+      '[data-sitekey]'
+    ];
+
+    const captchaElements = await driver.findElements(By.css(captchaSelectors.join(', ')));
+
+    if (captchaElements.length > 0) {
+      console.log(`🔍 CAPTCHA detected! Found ${captchaElements.length} CAPTCHA elements`);
+
+      // Try to extract the site key
+      let siteKey = null;
+
+      try {
+        // Method 1: Look for data-sitekey attribute
+        const siteKeyElement = await driver.findElement(By.css('[data-sitekey]'));
+        siteKey = await siteKeyElement.getAttribute('data-sitekey');
+        console.log(`🔑 Site key found via data-sitekey: ${siteKey}`);
+      } catch (e) {
+        // Method 2: Look in iframe src
+        try {
+          const iframe = await driver.findElement(By.css('iframe[src*="recaptcha"]'));
+          const src = await iframe.getAttribute('src');
+          const match = src.match(/k=([^&]+)/);
+          if (match) {
+            siteKey = match[1];
+            console.log(`🔑 Site key found via iframe src: ${siteKey}`);
+          }
+        } catch (e2) {
+          // Method 3: Look in page source for site key
+          try {
+            const pageSource = await driver.getPageSource();
+            const match = pageSource.match(/data-sitekey=["']([^"']+)["']/);
+            if (match) {
+              siteKey = match[1];
+              console.log(`🔑 Site key found in page source: ${siteKey}`);
+            }
+          } catch (e3) {
+            console.log(`⚠️ Could not extract site key, using default`);
+            // Use a common Google reCAPTCHA site key as fallback
+            siteKey = '6LfW3QkTAAAAAHqPn3vIwDlWx_JpC0pkTiYKjbxj';
+          }
+        }
+      }
+
+      return {
+        detected: true,
+        siteKey: siteKey
+      };
+    }
+
+    return { detected: false };
+  } catch (error) {
+    console.log(`⚠️ Error detecting CAPTCHA: ${error.message}`);
+    return { detected: false };
+  }
+};
 
 const parsePrompt = (prompt) => {
   const patterns = [
@@ -327,22 +421,39 @@ const scrapeWebsite = async (driver, url, category) => {
       }
     }
 
-    // Only return lead if we have meaningful contact information
-    if (phones.length > 0 || emails.length > 0) {
+    // ✅ UPDATED: Only return lead if we have BOTH phone AND email
+    if (phones.length > 0 && emails.length > 0) {
+      // ✅ ALWAYS replace the lead's name using its website URL
+      const extractedName = extractNameFromURL(url);
+      const finalName = extractedName || name || 'Business'; // Use extracted name, fallback to original or 'Business'
+
+      if (extractedName) {
+        console.log(`   🔄 Name extracted from URL "${url}" → "${finalName}"`);
+      } else {
+        console.log(`   ⚠️ Could not extract name from URL, using fallback: "${finalName}"`);
+      }
+
       const lead = {
-        name: name,
-        phone: phones.length > 0 ? phones[0] : 'Phone not available',
-        email: emails.length > 0 ? emails[0] : 'Email not available',
+        name: finalName,
+        phone: phones[0],
+        email: emails[0],
         website: url,
         address: address,
         source: 'selenium_scraper'
       };
 
-      console.log(`   ✅ CONTACT FOUND: ${lead.name} | ${lead.phone} | ${lead.email} | ${lead.address.substring(0, 30)}...`);
+      console.log(`   ✅ VALID LEAD FOUND: ${lead.name} | ${lead.phone} | ${lead.email} | ${lead.address.substring(0, 30)}...`);
       return lead;
     }
 
-    console.log(`   ⚠️ No contact info found on: ${url}`);
+    // Log why lead was rejected
+    if (phones.length === 0 && emails.length === 0) {
+      console.log(`   ❌ REJECTED - No phone or email found on: ${url}`);
+    } else if (phones.length === 0) {
+      console.log(`   ❌ REJECTED - No phone number found on: ${url}`);
+    } else if (emails.length === 0) {
+      console.log(`   ❌ REJECTED - No email address found on: ${url}`);
+    }
     return null;
 
   } catch (e) {
@@ -351,353 +462,549 @@ const scrapeWebsite = async (driver, url, category) => {
   }
 };
 
-// New function to scrape with CAPTCHA session
-export const scrapeLeadsWithCaptchaSession = async (prompt, sessionId = null) => {
-  console.log(`\n🔍 SCRAPER WITH CAPTCHA SESSION - Prompt: "${prompt}"`);
-  console.log(`🔐 Session ID: ${sessionId || 'none - will create new'}`);
-
-  // If sessionId provided, try to use existing session
-  if (sessionId && captchaSessions.has(sessionId)) {
-    const session = captchaSessions.get(sessionId);
-
-    if (session.resolved) {
-      console.log(`✅ Using resolved CAPTCHA session: ${sessionId}`);
-      return await continueScrapingWithDriver(session.driver, prompt);
-    } else {
-      console.log(`⚠️ CAPTCHA session not resolved yet: ${sessionId}`);
-      return {
-        error: 'CAPTCHA not resolved',
-        sessionId,
-        requiresCaptcha: true
-      };
-    }
-  }
-
-  // Fall back to regular scraping
-  return await scrapeLeadsWithSelenium(prompt);
-};
-
-// Helper function to continue scraping with existing driver
-const continueScrapingWithDriver = async (driver, prompt) => {
-  try {
-    const { count, category, location } = parsePrompt(prompt);
-    console.log(`🎯 Continuing scrape: ${count} ${category} in ${location}`);
-
-    // Continue with the existing scraping logic using the provided driver
-    // (This would contain the main scraping logic from the original function)
-
-    const leads = [];
-    // ... scraping logic here ...
-
-    return leads;
-  } catch (error) {
-    console.error(`❌ Error in continueScrapingWithDriver:`, error);
-    return [];
-  }
-};
-
-export const scrapeLeadsWithSelenium = async (prompt) => {
+export const scrapeLeadsWithSelenium = async (prompt, progressCallback = null) => {
   console.log(`\n🔍 SCRAPER STARTED - Prompt: "${prompt}"`);
-
-  // Detect if we're running in production (Render) or locally
-  const isProduction = process.env.NODE_ENV === 'production' || process.env.RENDER;
-  let tmpDir = null;
 
   try {
     const { count, category, location } = parsePrompt(prompt);
     console.log(`🎯 Target: ${count} ${category} in ${location}`);
 
-    console.log(`🚀 Setting up Chrome options...`);
-    const options = new chrome.Options();
-
-    if (isProduction) {
-      console.log(`🌐 Production environment detected - using headless mode`);
-      // Production settings for Render/cloud environments
-      options.addArguments('--headless=new'); // Use new headless mode
-      options.addArguments('--no-sandbox');
-      options.addArguments('--disable-dev-shm-usage');
-      options.addArguments('--disable-gpu');
-      options.addArguments('--disable-web-security');
-      options.addArguments('--disable-features=VizDisplayCompositor');
-      options.addArguments('--disable-extensions');
-      options.addArguments('--disable-plugins');
-      options.addArguments('--disable-images');
-      options.addArguments('--disable-default-apps');
-      options.addArguments('--disable-background-timer-throttling');
-      options.addArguments('--disable-backgrounding-occluded-windows');
-      options.addArguments('--disable-renderer-backgrounding');
-      options.addArguments('--disable-background-networking');
-      options.addArguments('--remote-debugging-port=9222');
-      options.addArguments('--window-size=1920,1080');
-
-      // Anti-detection measures to reduce CAPTCHA likelihood
-      options.addArguments('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-      options.addArguments('--accept-lang=en-US,en;q=0.9');
-      options.addArguments('--disable-blink-features=AutomationControlled');
-      options.addArguments('--disable-automation');
-      options.addArguments('--disable-infobars');
-      options.addArguments('--disable-notifications');
-      options.addArguments('--disable-popup-blocking');
-      options.addArguments('--disable-save-password-bubble');
-
-      // Use a unique temporary directory for user data
-      tmpDir = `/tmp/chrome-user-data-${Date.now()}-${Math.random().toString(36).substring(2, 11)}`;
-      options.addArguments(`--user-data-dir=${tmpDir}`);
-      options.addArguments('--single-process'); // Important for containerized environments
-      options.addArguments('--no-zygote'); // Important for containerized environments
-    } else {
-      console.log(`💻 Local environment detected - using visible browser`);
-      // Local development settings
-      options.addArguments('--no-sandbox');
-      options.addArguments('--disable-dev-shm-usage');
-      options.addArguments('--window-size=1920,1080');
-      // Do NOT add --headless so CAPTCHA can be solved manually in local development
+    // Send initial progress update
+    if (progressCallback) {
+      progressCallback({
+        message: `Starting search for ${category} in ${location}...`,
+        percent: 5,
+        leadsFound: 0
+      });
     }
+
+    // Create a session identifier for this scraping session
+    const sessionKey = `${category}_${location}`.toLowerCase().replace(/[^a-z0-9]/g, '_');
+    const isHeadlessAllowed = captchaSolvedSessions.has(sessionKey);
+
+    console.log(`🚀 Setting up Chrome options...`);
+    console.log(`🔍 Session key: ${sessionKey}`);
+    console.log(`🤖 Headless mode: ALWAYS ENABLED (CAPTCHA handled in frontend)`);
+
+    const options = new chrome.Options();
+    options.addArguments('--no-sandbox');
+    options.addArguments('--disable-dev-shm-usage');
+    options.addArguments('--headless'); // Always use headless mode
+    options.addArguments('--disable-blink-features=AutomationControlled');
+    options.addArguments('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
+
+    console.log(`✅ Using headless mode - CAPTCHA will be handled in React frontend`);
 
     console.log(`🚀 Building Chrome driver...`);
-    let driver;
-    try {
-      driver = await new Builder().forBrowser('chrome').setChromeOptions(options).build();
-      console.log(`✅ Chrome driver created successfully`);
-    } catch (driverError) {
-      console.error(`❌ Failed to create Chrome driver: ${driverError.message}`);
-      if (isProduction) {
-        console.error(`💡 This might be because Chrome is not installed on the server.`);
-        console.error(`💡 Make sure your Render service has Chrome/Chromium installed.`);
-        console.error(`💡 You may need to add a build script to install Chrome.`);
-      }
-      throw new Error(`Chrome driver initialization failed: ${driverError.message}`);
-    }
+    const driver = await new Builder().forBrowser('chrome').setChromeOptions(options).build();
+    console.log(`✅ Chrome driver created successfully`);
 
     const leads = [];
 
     try {
-      // Different approach for production vs local
-      if (isProduction) {
-        console.log("🌐 Production mode: Using alternative search approach to avoid CAPTCHA");
+      const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(`${category} ${location} contact phone number`)}`;
+      console.log(`🔍 Searching: ${searchUrl}`);
+      await driver.get(searchUrl);
 
-        // Try multiple search strategies to avoid CAPTCHA
-        const searchStrategies = [
-          // Strategy 1: Direct business directory search
-          `https://www.yelp.com/search?find_desc=${encodeURIComponent(category)}&find_loc=${encodeURIComponent(location)}`,
-          // Strategy 2: Yellow Pages
-          `https://www.yellowpages.com/search?search_terms=${encodeURIComponent(category)}&geo_location_terms=${encodeURIComponent(location)}`,
-          // Strategy 3: Google with different parameters to reduce CAPTCHA likelihood
-          `https://www.google.com/search?q=${encodeURIComponent(`"${category}" "${location}" site:yellowpages.com OR site:yelp.com`)}&num=20`
-        ];
+      // Check for CAPTCHA immediately after page load
+      console.log("🛑 Checking for CAPTCHA...");
+      await delay(2000); // Wait for page to load
 
-        let searchUrl = searchStrategies[2]; // Start with Google but with specific sites
-        console.log(`🔍 Production Search: ${searchUrl}`);
-        await driver.get(searchUrl);
+      const captchaCheck = await detectCaptcha(driver);
 
-        // Quick CAPTCHA check in production
-        await delay(3000);
-        const captchaCheck = await driver.findElements(By.css('[id*="captcha"], [class*="captcha"], [id*="recaptcha"]'));
+      if (captchaCheck.detected) {
+        console.log("🔒 CAPTCHA detected! Requesting frontend solving...");
 
-        if (captchaCheck.length > 0) {
-          console.log("⚠️ CAPTCHA detected in production - trying alternative approaches");
+        // Generate session ID for this CAPTCHA solving session
+        const sessionId = uuidv4();
+        console.log(`🆔 CAPTCHA Session ID: ${sessionId}`);
 
-          // Try multiple fallback strategies
-          for (let i = 0; i < searchStrategies.length - 1; i++) {
-            try {
-              searchUrl = searchStrategies[i];
-              console.log(`🔄 Fallback ${i + 1}: ${searchUrl}`);
-              await driver.get(searchUrl);
-              await delay(3000);
+        // Store the current scraping state to resume later
+        const scrapingState = {
+          driver,
+          prompt,
+          count,
+          category,
+          location,
+          sessionKey,
+          currentUrl: await driver.getCurrentUrl()
+        };
 
-              // Check if this source also has CAPTCHA
-              const fallbackCaptchaCheck = await driver.findElements(By.css('[id*="captcha"], [class*="captcha"], [id*="recaptcha"]'));
-              if (fallbackCaptchaCheck.length === 0) {
-                console.log(`✅ Successfully switched to alternative source`);
-                break;
-              } else {
-                console.log(`⚠️ CAPTCHA also present on fallback source ${i + 1}`);
-              }
-            } catch (e) {
-              console.log(`❌ Error with fallback ${i + 1}: ${e.message}`);
-            }
-          }
+        // Create a promise that will be resolved when CAPTCHA is solved
+        const captchaPromise = new Promise((resolve, reject) => {
+          // Store the session with driver and promise resolvers
+          createCaptchaSession(sessionId, driver, resolve, reject, sessionKey);
+        });
 
-          // Final check - if all sources have CAPTCHA, return error
-          const finalCaptchaCheck = await driver.findElements(By.css('[id*="captcha"], [class*="captcha"], [id*="recaptcha"]'));
-          if (finalCaptchaCheck.length > 0) {
-            console.log("❌ All sources require CAPTCHA in production mode");
-            console.log("💡 This is a temporary issue. Please try again later or use local development mode.");
-            return [];
-          }
-        }
+        // Return CAPTCHA required response to frontend immediately
+        // The frontend will handle the CAPTCHA and call /api/captcha/solve
+        // which will resolve the captchaPromise and allow us to continue
+        return {
+          captchaRequired: true,
+          sessionId: sessionId,
+          siteKey: captchaCheck.siteKey,
+          message: 'CAPTCHA solving required'
+        };
+      }
 
+      // Check for search result indicators to ensure page loaded properly
+      const searchResultElements = await driver.findElements(By.css([
+        'div[data-ved]', // Google search result containers
+        'div.g', // Google result divs
+        'h3', // Result titles
+        '#search' // Search results container
+      ].join(', ')));
+
+      if (searchResultElements.length === 0) {
+        console.log("⚠️ No search results found, page may not have loaded properly");
+        // Still continue with scraping attempt
       } else {
-        // Local development - original Google search with manual CAPTCHA solving
-        const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(`${category} ${location} contact phone number`)}`;
-        console.log(`🔍 Local Search: ${searchUrl}`);
-        await driver.get(searchUrl);
-
-        // Auto-detect CAPTCHA completion in local mode
-        console.log("🛑 Checking for CAPTCHA and waiting for search results...");
-
-        let captchaResolved = false;
-        let attempts = 0;
-        const maxAttempts = 60; // Wait up to 60 seconds
-
-        while (!captchaResolved && attempts < maxAttempts) {
-          attempts++;
-
-          try {
-            const currentUrl = await driver.getCurrentUrl();
-            console.log(`⏳ Attempt ${attempts}/${maxAttempts} - Current URL: ${currentUrl.substring(0, 100)}...`);
-
-            // Check for CAPTCHA indicators
-            const captchaElements = await driver.findElements(By.css([
-              '[id*="captcha"]',
-              '[class*="captcha"]',
-              '[id*="recaptcha"]',
-              '[class*="recaptcha"]',
-              'iframe[src*="recaptcha"]'
-            ].join(', ')));
-
-            // Check for search result indicators
-            const searchResultElements = await driver.findElements(By.css([
-              'div[data-ved]',
-              'div.g',
-              'h3',
-              '#search'
-            ].join(', ')));
-
-            if (searchResultElements.length > 0 && captchaElements.length === 0) {
-              console.log("✅ Search results detected - CAPTCHA resolved!");
-              captchaResolved = true;
-              break;
-            }
-
-            if (captchaElements.length > 0) {
-              console.log("🔄 CAPTCHA present - please solve it manually...");
-            } else if (searchResultElements.length === 0) {
-              console.log("🔄 Waiting for search results...");
-            }
-
-          } catch (e) {
-            console.log(`⚠️ Error checking page state: ${e.message}`);
-          }
-
-          await delay(1000);
-        }
-
-        if (!captchaResolved) {
-          console.log("❌ Timeout waiting for CAPTCHA resolution");
-          return [];
-        }
+        console.log("✅ Search results detected - proceeding with scraping");
       }
 
       // Additional wait for page to fully stabilize
       console.log("⏳ Waiting for search results to fully load...");
       await delay(2000);
 
-      // Detect which site we're on and use appropriate selectors
-      const currentUrl = await driver.getCurrentUrl();
-      let resultEls = [];
-      let selectors = [];
-
-      if (currentUrl.includes('yelp.com')) {
-        console.log("🟡 Detected Yelp - using Yelp-specific selectors");
-        selectors = [
-          'a[href*="/biz/"]', // Yelp business links
-          '.businessName a', // Business name links
-          '[data-testid="serp-ia-card"] a' // Yelp search result cards
-        ];
-      } else if (currentUrl.includes('yellowpages.com')) {
-        console.log("🟨 Detected Yellow Pages - using YP-specific selectors");
-        selectors = [
-          '.result .business-name a', // YP business links
-          '.info h3 a', // YP result titles
-          'a[href*="/business/"]' // YP business page links
-        ];
-      } else {
-        console.log("🔍 Using Google search selectors");
-        selectors = [
+      // ✅ NEW: Function to extract URLs from current page
+      const extractUrlsFromCurrentPage = async () => {
+        // Try multiple selectors for Google search results
+        let resultEls = [];
+        const selectors = [
           'div[data-ved] a[href^="http"]:not([href*="google.com"])', // Main search results
           'h3 a[href^="http"]:not([href*="google.com"])', // Title links
           'a[href^="http"]:not([href*="google.com"]):not([href*="youtube.com"]):not([href*="facebook.com"])', // General links excluding social media
           'div.g a[href^="http"]' // Google result container links
         ];
-      }
 
-      for (const selector of selectors) {
-        try {
-          console.log(`🔍 Trying selector: ${selector}`);
-          resultEls = await driver.findElements(By.css(selector));
-          if (resultEls.length > 0) {
-            console.log(`✅ Found ${resultEls.length} elements with selector: ${selector}`);
-            break;
-          }
-        } catch (e) {
-          console.log(`⚠️ Selector failed: ${selector} - ${e.message}`);
-        }
-      }
-
-      if (resultEls.length === 0) {
-        console.log("❌ No search result links found. Trying fallback approach...");
-        // Fallback: get all links and filter them
-        const allLinks = await driver.findElements(By.css('a[href]'));
-        console.log(`📊 Found ${allLinks.length} total links on page`);
-
-        for (let link of allLinks) {
+        for (const selector of selectors) {
           try {
-            const href = await link.getAttribute('href');
+            console.log(`🔍 Trying selector: ${selector}`);
+            resultEls = await driver.findElements(By.css(selector));
+            if (resultEls.length > 0) {
+              console.log(`✅ Found ${resultEls.length} elements with selector: ${selector}`);
+              break;
+            }
+          } catch (e) {
+            console.log(`⚠️ Selector failed: ${selector} - ${e.message}`);
+          }
+        }
+
+        if (resultEls.length === 0) {
+          console.log("❌ No search result links found. Trying fallback approach...");
+          // Fallback: get all links and filter them
+          const allLinks = await driver.findElements(By.css('a[href]'));
+          console.log(`📊 Found ${allLinks.length} total links on page`);
+
+          for (let link of allLinks) {
+            try {
+              const href = await link.getAttribute('href');
+              if (href && href.startsWith('http') &&
+                  !href.includes('google.com') &&
+                  !href.includes('youtube.com') &&
+                  !href.includes('facebook.com') &&
+                  !href.includes('instagram.com') &&
+                  !href.includes('twitter.com')) {
+                resultEls.push(link);
+              }
+            } catch (e) {}
+          }
+        }
+
+        let urls = [];
+        console.log(`📊 Processing ${resultEls.length} potential result links`);
+
+        for (let el of resultEls) {
+          try {
+            const href = await el.getAttribute('href');
             if (href && href.startsWith('http') &&
                 !href.includes('google.com') &&
                 !href.includes('youtube.com') &&
                 !href.includes('facebook.com') &&
                 !href.includes('instagram.com') &&
                 !href.includes('twitter.com')) {
-              resultEls.push(link);
+              urls.push(href);
+              console.log(`🔗 Added URL: ${href}`);
             }
-          } catch (e) {}
-        }
-      }
-
-      let urls = [];
-      console.log(`📊 Processing ${resultEls.length} potential result links`);
-
-      for (let el of resultEls) {
-        try {
-          const href = await el.getAttribute('href');
-          if (href && href.startsWith('http') &&
-              !href.includes('google.com') &&
-              !href.includes('youtube.com') &&
-              !href.includes('facebook.com') &&
-              !href.includes('instagram.com') &&
-              !href.includes('twitter.com')) {
-            urls.push(href);
-            console.log(`🔗 Added URL: ${href}`);
+          } catch (e) {
+            console.log(`⚠️ Error getting href: ${e.message}`);
           }
-        } catch (e) {
-          console.log(`⚠️ Error getting href: ${e.message}`);
         }
-      }
 
-      const uniqueUrls = [...new Set(urls)];
-      console.log(`🔗 Found ${uniqueUrls.length} unique URLs to scrape`);
+        return [...new Set(urls)]; // Return unique URLs
+      };
 
-      if (uniqueUrls.length === 0) {
-        console.log("❌ No URLs found to scrape. This might indicate:");
-        console.log("   - CAPTCHA wasn't solved correctly");
-        console.log("   - Search results page didn't load properly");
-        console.log("   - Google changed their page structure");
-
-        // Take a screenshot for debugging
+      // ✅ NEW: Function to try infinite scroll with safety measures
+      const tryInfiniteScroll = async () => {
         try {
-          const screenshot = await driver.takeScreenshot();
-          const fs = await import('fs');
-          const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-          fs.writeFileSync(`debug-screenshot-${timestamp}.png`, screenshot, 'base64');
-          console.log(`📸 Screenshot saved as debug-screenshot-${timestamp}.png`);
-        } catch (e) {
-          console.log("⚠️ Could not take screenshot");
-        }
+          console.log(`🔍 Trying infinite scroll method...`);
 
-        return [];
-      }
+          // Safety measure: Track scroll attempts to prevent infinite loops
+          let scrollAttempts = 0;
+          const maxScrollAttempts = 3;
+
+          // Get current page height and content before scrolling
+          const beforeScrollHeight = await driver.executeScript("return document.body.scrollHeight");
+          const beforeContent = await driver.getPageSource();
+          const beforeContentLength = beforeContent.length;
+
+          console.log(`📏 Page height before scroll: ${beforeScrollHeight}px`);
+          console.log(`📄 Content length before scroll: ${beforeContentLength} characters`);
+
+          // Perform infinite scroll
+          await driver.executeScript("window.scrollTo(0, document.body.scrollHeight)");
+          console.log(`🔄 Scrolled to bottom of page - waiting for new content...`);
+
+          // Wait for potential new content to load (increased wait time)
+          await delay(3000);
+
+          // Check if new content loaded
+          const afterScrollHeight = await driver.executeScript("return document.body.scrollHeight");
+          const afterContent = await driver.getPageSource();
+          const afterContentLength = afterContent.length;
+
+          console.log(`📏 Page height after scroll: ${afterScrollHeight}px`);
+          console.log(`📄 Content length after scroll: ${afterContentLength} characters`);
+
+          // Verify if new content actually loaded
+          const heightIncreased = afterScrollHeight > beforeScrollHeight;
+          const contentIncreased = afterContentLength > beforeContentLength;
+
+          if (heightIncreased || contentIncreased) {
+            console.log(`✅ Infinite scroll successful - new content detected!`);
+            console.log(`   📏 Height change: ${beforeScrollHeight}px → ${afterScrollHeight}px`);
+            console.log(`   📄 Content change: ${beforeContentLength} → ${afterContentLength} characters`);
+
+            // Additional wait for content to stabilize
+            await delay(2000);
+            return true;
+          } else {
+            console.log(`❌ No new content loaded after infinite scroll`);
+
+            // Try scrolling to different positions as fallback (with safety limits)
+            while (scrollAttempts < maxScrollAttempts) {
+              scrollAttempts++;
+              console.log(`🔄 Trying alternative scroll positions (attempt ${scrollAttempts}/${maxScrollAttempts})...`);
+
+              // Scroll to different positions
+              const scrollPositions = [0.75, 0.5, 0.9]; // 75%, 50%, 90% of page height
+              const scrollPosition = scrollPositions[scrollAttempts - 1] || 0.75;
+
+              await driver.executeScript(`window.scrollTo(0, document.body.scrollHeight * ${scrollPosition})`);
+              await delay(2000);
+
+              // Then scroll to bottom again
+              await driver.executeScript("window.scrollTo(0, document.body.scrollHeight)");
+              await delay(3000);
+
+              // Check again for new content
+              const finalScrollHeight = await driver.executeScript("return document.body.scrollHeight");
+              const finalContent = await driver.getPageSource();
+
+              if (finalScrollHeight > afterScrollHeight || finalContent.length > afterContentLength) {
+                console.log(`✅ Alternative scroll method successful on attempt ${scrollAttempts}!`);
+                await delay(2000);
+                return true;
+              } else {
+                console.log(`❌ Scroll attempt ${scrollAttempts} failed - no new content`);
+              }
+            }
+
+            console.log(`❌ Infinite scroll exhausted after ${maxScrollAttempts} attempts - no more content available`);
+            return false;
+          }
+        } catch (error) {
+          console.log(`❌ Error during infinite scroll: ${error.message}`);
+          return false;
+        }
+      };
+
+      // ✅ ENHANCED: Function to check for and click "Load More" button
+      const loadMoreResults = async () => {
+        try {
+          console.log(`🔍 Looking for Load More button...`);
+
+          // Wait a moment for any dynamic content to load
+          await delay(1000);
+
+          // Multiple selectors for "Load More" buttons (comprehensive list)
+          const loadMoreSelectors = [
+            'button[aria-label*="Load more"]',
+            'button[aria-label*="Show more"]',
+            'button[aria-label*="See more"]',
+            'button[aria-label*="More results"]',
+            'button[aria-label*="More search results"]',
+            'a[aria-label*="Load more"]',
+            'a[aria-label*="Show more"]',
+            'a[aria-label*="See more"]',
+            'a[aria-label*="More results"]',
+            'a[aria-label*="More search results"]',
+            '.load-more',
+            '.show-more',
+            '.see-more',
+            '.more-results',
+            '.more-search-results',
+            '[data-testid*="load-more"]',
+            '[data-testid*="show-more"]',
+            '[data-testid*="see-more"]',
+            '[data-testid*="More results"]',
+            '[data-testid*="More search results"]',
+            '[class*="load-more"]',
+            '[class*="show-more"]',
+            '[class*="see-more"]',
+            '[class*="More results"]',
+            '[class*="More search results"]',
+            '[id*="load-more"]',
+            '[id*="show-more"]',
+            '[id*="see-more"]',
+            '[id*="More results"]',
+            '[id*="More search results"]'
+          ];
+
+          console.log(`🔍 Trying ${loadMoreSelectors.length} different Load More button selectors...`);
+
+          for (const selector of loadMoreSelectors) {
+            try {
+              console.log(`🔍 Trying Load More selector: ${selector}`);
+
+              // Skip :contains selectors as they're not supported in Selenium
+              if (selector.includes(':contains')) {
+                // Use XPath instead for text-based searches (comprehensive list)
+                const xpathSelectors = [
+                  "//button[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'load more')]",
+                  "//button[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'show more')]",
+                  "//button[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'see more')]",
+                  "//button[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'more results')]",
+                  "//button[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'more search results')]",
+                  "//a[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'load more')]",
+                  "//a[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'show more')]",
+                  "//a[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'see more')]",
+                  "//span[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'load more')]",
+                  "//span[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'show more')]",
+                  "//div[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'load more')]",
+                  "//div[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'show more')]"
+                ];
+
+                for (const xpath of xpathSelectors) {
+                  try {
+                    const loadMoreButtons = await driver.findElements(By.xpath(xpath));
+                    console.log(`🔍 Found ${loadMoreButtons.length} elements with XPath: ${xpath}`);
+
+                    for (let loadMoreButton of loadMoreButtons) {
+                      const isEnabled = await loadMoreButton.isEnabled();
+                      const isDisplayed = await loadMoreButton.isDisplayed();
+                      const text = await loadMoreButton.getText();
+
+                      console.log(`🔍 Found Load More button - Text: "${text}", Enabled: ${isEnabled}, Displayed: ${isDisplayed}`);
+
+                      if (isEnabled && isDisplayed) {
+                        console.log(`🔄 Found valid Load More button with XPath: ${xpath}`);
+
+                        // Get current page content to verify new content loads
+                        const beforeContent = await driver.getPageSource();
+
+                        await loadMoreButton.click();
+                        console.log(`✅ Clicked Load More button - waiting for new content to load...`);
+                        await delay(3000); // Wait for new content to load
+
+                        // Verify new content actually loaded
+                        const afterContent = await driver.getPageSource();
+                        if (afterContent.length > beforeContent.length) {
+                          console.log(`✅ New content loaded successfully!`);
+                          await delay(2000); // Additional wait for content to stabilize
+                          return true;
+                        } else {
+                          console.log(`⚠️ No new content detected after clicking Load More`);
+                        }
+                      }
+                    }
+                  } catch (e) {
+                    console.log(`⚠️ XPath failed: ${xpath} - ${e.message}`);
+                  }
+                }
+                continue; // Skip the CSS selector version
+              }
+
+              // Try CSS selectors
+              const loadMoreButtons = await driver.findElements(By.css(selector));
+              console.log(`🔍 Found ${loadMoreButtons.length} elements with selector: ${selector}`);
+
+              for (let loadMoreButton of loadMoreButtons) {
+                try {
+                  const isEnabled = await loadMoreButton.isEnabled();
+                  const isDisplayed = await loadMoreButton.isDisplayed();
+                  const text = await loadMoreButton.getText();
+
+                  console.log(`🔍 Found Load More button - Text: "${text}", Enabled: ${isEnabled}, Displayed: ${isDisplayed}`);
+
+                  if (isEnabled && isDisplayed) {
+                    console.log(`🔄 Found valid Load More button with selector: ${selector}`);
+
+                    // Get current page content to verify new content loads
+                    const beforeContent = await driver.getPageSource();
+
+                    await loadMoreButton.click();
+                    console.log(`✅ Clicked Load More button - waiting for new content to load...`);
+                    await delay(3000); // Wait for new content to load
+
+                    // Verify new content actually loaded
+                    const afterContent = await driver.getPageSource();
+                    if (afterContent.length > beforeContent.length) {
+                      console.log(`✅ New content loaded successfully!`);
+                      await delay(2000); // Additional wait for content to stabilize
+                      return true;
+                    } else {
+                      console.log(`⚠️ No new content detected after clicking Load More`);
+                    }
+                  }
+                } catch (e) {
+                  console.log(`⚠️ Error checking Load More button: ${e.message}`);
+                }
+              }
+            } catch (e) {
+              console.log(`⚠️ Load More selector failed: ${selector} - ${e.message}`);
+            }
+          }
+
+          console.log(`❌ No Load More button found`);
+          return false;
+        } catch (error) {
+          console.log(`❌ Error looking for Load More button: ${error.message}`);
+          return false;
+        }
+      };
+
+      // ✅ ENHANCED: Function to check for and click Next button (pagination style)
+      const goToNextPage = async () => {
+        try {
+          console.log(`🔍 Looking for Next button on current page...`);
+          const currentUrl = await driver.getCurrentUrl();
+          console.log(`📍 Current URL: ${currentUrl}`);
+
+          // Wait a moment for page to fully load
+          await delay(1000);
+
+          // Multiple selectors for "Next" button on Google (fixed selectors)
+          const nextSelectors = [
+            'a[aria-label="Next page"]',
+            'a[id="pnnext"]',
+            'a[aria-label="Next"]',
+            'span[style*="left:0"] a', // Next button in pagination
+            'td.b a[href*="start="]' // Pagination links
+          ];
+
+          console.log(`🔍 Trying ${nextSelectors.length} different Next button selectors...`);
+
+          // Try each selector to find Next button
+          for (const selector of nextSelectors) {
+            try {
+              console.log(`🔍 Trying Next button selector: ${selector}`);
+              const nextButtons = await driver.findElements(By.css(selector));
+              console.log(`🔍 Found ${nextButtons.length} elements with selector: ${selector}`);
+
+              for (let nextButton of nextButtons) {
+                try {
+                  const isEnabled = await nextButton.isEnabled();
+                  const isDisplayed = await nextButton.isDisplayed();
+                  const text = await nextButton.getText();
+                  const href = await nextButton.getAttribute('href');
+
+                  console.log(`🔍 Found button - Text: "${text}", Href: "${href}", Enabled: ${isEnabled}, Displayed: ${isDisplayed}`);
+
+                  if (isEnabled && isDisplayed) {
+                    // Additional check for "Next" text or arrow
+                    if (text.toLowerCase().includes('next') || text.includes('›') || text.includes('→') ||
+                        selector.includes('pnnext') || (href && href.includes('start='))) {
+                      console.log(`🔄 Found valid Next button with selector: ${selector}`);
+
+                      // Store current URL to verify navigation
+                      const beforeClickUrl = await driver.getCurrentUrl();
+                      console.log(`📍 Before click URL: ${beforeClickUrl}`);
+
+                      await nextButton.click();
+                      console.log(`✅ Clicked Next button - waiting for new page to load...`);
+                      await delay(4000); // Increased wait time for page load
+
+                      // Verify we actually navigated to a new page
+                      const afterClickUrl = await driver.getCurrentUrl();
+                      console.log(`📍 After click URL: ${afterClickUrl}`);
+
+                      if (afterClickUrl !== beforeClickUrl) {
+                        console.log(`✅ Successfully navigated to new page!`);
+
+                        // Wait for search results to load
+                        await delay(2000);
+                        return true;
+                      } else {
+                        console.log(`⚠️ URL didn't change after clicking Next button - trying next option`);
+                      }
+                    } else {
+                      console.log(`⚠️ Button doesn't match Next criteria - Text: "${text}", Href: "${href}"`);
+                    }
+                  } else {
+                    console.log(`⚠️ Button not enabled or displayed - Enabled: ${isEnabled}, Displayed: ${isDisplayed}`);
+                  }
+                } catch (e) {
+                  console.log(`⚠️ Error checking button: ${e.message}`);
+                }
+              }
+            } catch (e) {
+              console.log(`⚠️ Selector failed: ${selector} - ${e.message}`);
+            }
+          }
+
+          // Enhanced fallback: Look for any pagination link with higher start parameter
+          console.log(`🔄 Trying pagination fallback...`);
+          try {
+            const paginationLinks = await driver.findElements(By.css('a[href*="start="]'));
+            console.log(`🔍 Found ${paginationLinks.length} pagination links`);
+
+            const currentStart = parseInt(new URL(currentUrl).searchParams.get('start') || '0');
+            console.log(`📍 Current start parameter: ${currentStart}`);
+
+            let bestNextLink = null;
+            let bestNextStart = currentStart;
+
+            for (let link of paginationLinks) {
+              try {
+                const href = await link.getAttribute('href');
+                const nextStart = parseInt(new URL(href, 'https://google.com').searchParams.get('start') || '0');
+
+                // Find the next sequential page (not just any higher number)
+                if (nextStart > currentStart && (bestNextLink === null || nextStart < bestNextStart)) {
+                  bestNextLink = link;
+                  bestNextStart = nextStart;
+                }
+              } catch (e) {
+                console.log(`⚠️ Error processing pagination link: ${e.message}`);
+              }
+            }
+
+            if (bestNextLink) {
+              console.log(`🔄 Found best pagination link: start=${bestNextStart}`);
+              await bestNextLink.click();
+              console.log(`✅ Clicked pagination link - waiting for new page to load...`);
+              await delay(4000);
+
+              // Verify navigation
+              const afterClickUrl = await driver.getCurrentUrl();
+              if (afterClickUrl !== currentUrl) {
+                console.log(`✅ Successfully navigated via pagination: ${afterClickUrl}`);
+                await delay(2000);
+                return true;
+              }
+            }
+          } catch (e) {
+            console.log(`⚠️ Pagination fallback failed: ${e.message}`);
+          }
+
+          console.log(`❌ No Next button found - reached end of results`);
+          return false;
+        } catch (error) {
+          console.log(`❌ Error navigating to next page: ${error.message}`);
+          return false;
+        }
+      };
 
       // Helper function to normalize phone numbers for comparison
       const normalizePhone = (phone) => {
@@ -717,82 +1024,396 @@ export const scrapeLeadsWithSelenium = async (prompt) => {
         });
       };
 
-      const maxUrlsToCheck = Math.min(uniqueUrls.length, 100); // Increased to 100 to find more unique leads
-      console.log(`🎯 Will check up to ${maxUrlsToCheck} URLs to find ${count} unique leads`);
-
-      let urlIndex = 0;
-      let scrapedCount = 0;
+      // ✅ FIXED: Main pagination-aware scraping loop
+      let currentPage = 1;
+      let totalScrapedCount = 0;
       let duplicateCount = 0;
+      let rejectedCount = 0;
+      let allProcessedUrls = new Set(); // Track all URLs we've processed across pages
+      const maxPagesToCheck = 20; // Increased safety limit
+      let consecutiveEmptyPages = 0; // Track empty pages to avoid infinite loops
 
-      while (leads.length < count && urlIndex < maxUrlsToCheck) {
-        const url = uniqueUrls[urlIndex];
-        scrapedCount++;
-        console.log(`🌐 Scraping ${scrapedCount}/${maxUrlsToCheck}: ${url}`);
+      console.log(`🎯 Starting pagination-aware scraping to find ${count} valid leads (with both phone & email)`);
 
-        const lead = await scrapeWebsite(driver, url, category);
-        if (lead) {
-          // Check if this lead is a duplicate based on phone number
-          if (isDuplicateLead(lead, leads)) {
-            duplicateCount++;
-            console.log(`🔄 DUPLICATE LEAD SKIPPED: ${lead.name} | ${lead.phone} (Duplicate #${duplicateCount})`);
-          } else {
-            leads.push(lead);
-            console.log(`✅ UNIQUE LEAD FOUND: ${lead.name} | ${lead.phone} | ${lead.email} (${leads.length}/${count})`);
+      // ✅ Test the updated URL name extraction function (now used for ALL leads)
+      console.log(`🧪 Testing updated URL name extraction (ALL leads will use URL-extracted names):`);
+      console.log(`   "https://www.pizzahub-house.com" → "${extractNameFromURL('https://www.pizzahub-house.com')}"`);
+      console.log(`   "https://abc-cleaning.net" → "${extractNameFromURL('https://abc-cleaning.net')}"`);
+      console.log(`   "https://app.greenhouse-foods.com" → "${extractNameFromURL('https://app.greenhouse-foods.com')}"`);
+      console.log(`   "https://portal.joe-plumbing.co.uk" → "${extractNameFromURL('https://portal.joe-plumbing.co.uk')}"`);
+      console.log(`   "https://get.smith-auto.com" → "${extractNameFromURL('https://get.smith-auto.com')}"`);
+      console.log(`🧪 Updated URL extraction test complete - ALL leads will have clean URL-based names\n`);
+
+      while (leads.length < count && currentPage <= maxPagesToCheck) {
+        console.log(`\n📄 === PAGE ${currentPage} === (Found: ${leads.length}/${count} leads)`);
+        console.log(`🎯 Target: ${count} valid leads (with phone + email)`);
+        console.log(`📊 Progress: ${leads.length} valid leads found so far`);
+        console.log(`🔄 Pagination Methods: Next Button → Load More → Infinite Scroll → Alternative Search`);
+
+        // Send progress update when starting a new page
+        if (progressCallback && currentPage > 1) {
+          const progressPercent = Math.min(Math.round((leads.length / count) * 100), 95); // Cap at 95% until complete
+          progressCallback({
+            message: `Searching page ${currentPage}... Found ${leads.length} leads so far`,
+            percent: progressPercent,
+            leadsFound: leads.length
+          });
+        }
+
+        // Extract URLs from current page
+        const currentPageUrls = await extractUrlsFromCurrentPage();
+
+        if (currentPageUrls.length === 0) {
+          console.log(`❌ No URLs found on page ${currentPage}`);
+          consecutiveEmptyPages++;
+
+          if (currentPage === 1) {
+            console.log("❌ No URLs found on first page. This might indicate:");
+            console.log("   - CAPTCHA wasn't solved correctly");
+            console.log("   - Search results page didn't load properly");
+            console.log("   - Google changed their page structure");
+
+            // Take a screenshot for debugging
+            try {
+              const screenshot = await driver.takeScreenshot();
+              const fs = await import('fs');
+              const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+              fs.writeFileSync(`debug-screenshot-${timestamp}.png`, screenshot, 'base64');
+              console.log(`📸 Screenshot saved as debug-screenshot-${timestamp}.png`);
+            } catch (e) {
+              console.log("⚠️ Could not take screenshot");
+            }
+            return [];
+          }
+
+          // If we've had 2 consecutive empty pages, try to continue to next page anyway
+          if (consecutiveEmptyPages >= 2) {
+            console.log(`⚠️ ${consecutiveEmptyPages} consecutive empty pages - may have reached end`);
+            break;
+          }
+        } else {
+          consecutiveEmptyPages = 0; // Reset counter when we find URLs
+        }
+
+        // Filter out URLs we've already processed
+        const newUrls = currentPageUrls.filter(url => !allProcessedUrls.has(url));
+        console.log(`🔗 Found ${currentPageUrls.length} URLs on page ${currentPage}, ${newUrls.length} are new`);
+
+        // Process each URL on current page (only if we have new URLs or it's the first page)
+        if (newUrls.length > 0 || currentPage === 1) {
+          for (let i = 0; i < newUrls.length && leads.length < count; i++) {
+            const url = newUrls[i];
+            allProcessedUrls.add(url); // Mark as processed
+            totalScrapedCount++;
+
+            console.log(`🌐 Scraping ${totalScrapedCount}: ${url} (Page ${currentPage}, URL ${i+1}/${newUrls.length}) - Found: ${leads.length}/${count}`);
+
+            const lead = await scrapeWebsite(driver, url, category);
+            if (lead) {
+              // ✅ Lead already validated in scrapeWebsite() - only returns if has both phone & email
+              // Check if this lead is a duplicate based on phone number
+              if (isDuplicateLead(lead, leads)) {
+                duplicateCount++;
+                console.log(`🔄 DUPLICATE LEAD SKIPPED: ${lead.name} | ${lead.phone} (Duplicate #${duplicateCount})`);
+              } else {
+                leads.push(lead);
+                console.log(`✅ VALID LEAD ADDED: ${lead.name} | ${lead.phone} | ${lead.email} (${leads.length}/${count})`);
+
+                // Send live progress update when a new lead is found
+                if (progressCallback) {
+                  const progressPercent = Math.min(Math.round((leads.length / count) * 100), 100);
+                  progressCallback({
+                    message: `Found ${leads.length} leads so far... (Page ${currentPage})`,
+                    percent: progressPercent,
+                    leadsFound: leads.length
+                  });
+                }
+              }
+            } else {
+              rejectedCount++;
+              console.log(`❌ LEAD REJECTED: Missing phone or email (Rejected #${rejectedCount})`);
+            }
+
+            // Check if we've reached our target
+            if (leads.length >= count) {
+              console.log(`🎯 TARGET REACHED: ${leads.length} valid leads found (all have phone & email)`);
+
+              // Send final progress update when target is reached
+              if (progressCallback) {
+                progressCallback({
+                  message: `Target reached! Found ${leads.length} qualified leads`,
+                  percent: 100,
+                  leadsFound: leads.length
+                });
+              }
+              break;
+            }
           }
         }
 
-        urlIndex++;
+        // ✅ COMPREHENSIVE: Try all three pagination methods if we haven't reached target
+        if (leads.length < count) {
+          console.log(`\n🔄 Still need ${count - leads.length} more leads. Trying all pagination methods...`);
+          console.log(`📊 Current progress: ${leads.length}/${count} leads, ${totalScrapedCount} sites scraped, ${duplicateCount} duplicates, ${rejectedCount} rejected`);
 
-        // If we've reached our target, break
-        if (leads.length >= count) {
-          console.log(`🎯 Target reached: ${leads.length} unique leads found`);
+          let paginationSuccessful = false;
+
+          try {
+            // Method 1: Try traditional "Next" button pagination first
+            console.log(`\n🔄 Method 1: Trying Next button pagination...`);
+            const hasNextPage = await goToNextPage();
+
+            if (hasNextPage) {
+              currentPage++;
+              console.log(`✅ Next button pagination successful - moved to page ${currentPage}`);
+              consecutiveEmptyPages = 0;
+              paginationSuccessful = true;
+            } else {
+              console.log(`❌ Next button pagination failed`);
+
+              // Method 2: Try "Load More" button if Next button failed
+              console.log(`\n🔄 Method 2: Trying Load More button...`);
+              const hasLoadMore = await loadMoreResults();
+
+              if (hasLoadMore) {
+                console.log(`✅ Load More successful - new content loaded`);
+                consecutiveEmptyPages = 0;
+                paginationSuccessful = true;
+                // Don't increment currentPage for Load More since it's same page with more content
+              } else {
+                console.log(`❌ Load More failed`);
+
+                // Method 3: Try infinite scroll if both previous methods failed
+                console.log(`\n🔄 Method 3: Trying infinite scroll...`);
+                const hasInfiniteScroll = await tryInfiniteScroll();
+
+                if (hasInfiniteScroll) {
+                  console.log(`✅ Infinite scroll successful - new content loaded`);
+                  consecutiveEmptyPages = 0;
+                  paginationSuccessful = true;
+                  // Don't increment currentPage for infinite scroll since it's same page with more content
+                } else {
+                  console.log(`❌ Infinite scroll failed`);
+                }
+              }
+            }
+
+            if (paginationSuccessful) {
+              continue; // ✅ CRITICAL: Continue the loop to process new content
+            } else {
+              console.log(`❌ All three pagination methods failed. Trying final fallback...`);
+              console.log(`🔍 Final attempt: Checking for alternative pagination options...`);
+
+              // Final attempt: Try to find any other pagination/load more elements
+              try {
+                let foundAlternativePagination = false;
+
+                // Try to find numbered pagination links
+                console.log(`🔍 Searching for numbered pagination links...`);
+                const allLinks = await driver.findElements(By.css('a'));
+
+                for (let link of allLinks) {
+                  try {
+                    const text = await link.getText();
+                    const href = await link.getAttribute('href');
+
+                    if ((text.match(/^\d+$/) || text.includes('More') || text.includes('Next')) &&
+                        href && href.includes('start=')) {
+                      console.log(`🔍 Found potential pagination: "${text}" -> ${href}`);
+                      await link.click();
+                      await delay(3000);
+                      currentPage++;
+                      foundAlternativePagination = true;
+                      console.log(`✅ Alternative pagination successful - moved to page ${currentPage}`);
+                      break;
+                    }
+                  } catch (e) {
+                    // Continue checking other links
+                  }
+                }
+
+                // If no pagination links found, try to find any clickable elements with pagination-related text
+                if (!foundAlternativePagination) {
+                  console.log(`🔍 Searching for any clickable pagination elements...`);
+                  const allClickableElements = await driver.findElements(By.css('button, a, span[role="button"], div[role="button"]'));
+
+                  for (let element of allClickableElements) {
+                    try {
+                      const text = await element.getText();
+                      const ariaLabel = await element.getAttribute('aria-label');
+                      const className = await element.getAttribute('class');
+
+                      // Check for pagination-related text or attributes
+                      const paginationKeywords = ['next', 'more', 'load', 'show', 'continue', 'additional'];
+                      const textToCheck = `${text} ${ariaLabel} ${className}`.toLowerCase();
+
+                      if (paginationKeywords.some(keyword => textToCheck.includes(keyword))) {
+                        const isEnabled = await element.isEnabled();
+                        const isDisplayed = await element.isDisplayed();
+
+                        if (isEnabled && isDisplayed) {
+                          console.log(`🔍 Found potential pagination element: "${text}" (aria-label: "${ariaLabel}", class: "${className}")`);
+
+                          // Get page content before clicking
+                          const beforeContent = await driver.getPageSource();
+                          const beforeUrl = await driver.getCurrentUrl();
+
+                          await element.click();
+                          await delay(3000);
+
+                          // Check if content changed (either URL or page content)
+                          const afterContent = await driver.getPageSource();
+                          const afterUrl = await driver.getCurrentUrl();
+
+                          if (afterUrl !== beforeUrl || afterContent.length > beforeContent.length) {
+                            if (afterUrl !== beforeUrl) {
+                              currentPage++;
+                              console.log(`✅ Alternative pagination successful - moved to page ${currentPage}`);
+                            } else {
+                              console.log(`✅ Alternative load more successful - new content loaded`);
+                            }
+                            foundAlternativePagination = true;
+                            break;
+                          } else {
+                            console.log(`⚠️ Element clicked but no content change detected`);
+                          }
+                        }
+                      }
+                    } catch (e) {
+                      // Continue checking other elements
+                    }
+                  }
+                }
+
+                if (!foundAlternativePagination) {
+                  console.log(`❌ No alternative pagination found - truly reached end`);
+                  break; // Exit the while loop
+                } else {
+                  continue; // ✅ CRITICAL: Continue the loop to process new content
+                }
+              } catch (e) {
+                console.log(`❌ Alternative pagination search failed: ${e.message}`);
+                break; // Exit the while loop
+              }
+            }
+          } catch (paginationError) {
+            console.log(`❌ PAGINATION ERROR: ${paginationError.message}`);
+            console.log(`🛑 Stopping pagination due to error`);
+            break; // Exit the while loop
+          }
+        } else {
+          // Target reached, exit loop
+          console.log(`🎯 TARGET REACHED: Exiting pagination loop with ${leads.length}/${count} leads`);
           break;
         }
       }
 
-      // If we still need more leads and have exhausted current URLs, try to get more URLs
-      if (leads.length < count && urlIndex >= maxUrlsToCheck) {
-        console.log(`⚠️ Need ${count - leads.length} more leads but exhausted current URLs`);
-        console.log(`💡 Found ${duplicateCount} duplicates - consider expanding search or trying different keywords`);
+      // Final summary
+      if (leads.length < count) {
+        console.log(`\n⚠️ INCOMPLETE: Found ${leads.length}/${count} valid leads after checking ${currentPage} pages`);
+        console.log(`💡 Processed ${totalScrapedCount} websites total`);
+        console.log(`💡 Found ${duplicateCount} duplicates and ${rejectedCount} leads without phone/email`);
+        console.log(`💡 Had ${consecutiveEmptyPages} consecutive empty pages at end`);
+        if (currentPage >= maxPagesToCheck) {
+          console.log(`💡 Reached maximum page limit (${maxPagesToCheck}) - consider expanding search terms`);
+        } else {
+          console.log(`💡 Stopped due to no more pagination options available`);
+        }
+      } else {
+        console.log(`\n🎉 SUCCESS: Found all ${leads.length} requested valid leads!`);
       }
 
-      console.log(`\n📊 SCRAPING COMPLETE SUMMARY:`);
-      console.log(`   ✅ Unique leads found: ${leads.length}/${count}`);
-      console.log(`   🔄 Duplicates skipped: ${duplicateCount}`);
-      console.log(`   🌐 Total websites scraped: ${scrapedCount}`);
-      console.log(`   📈 Success rate: ${((leads.length / scrapedCount) * 100).toFixed(1)}%`);
+      console.log(`\n📊 PAGINATION SCRAPING COMPLETE SUMMARY:`);
+      console.log(`   ✅ Valid leads found (with phone & email): ${leads.length}/${count}`);
+      console.log(`   � Pages checked: ${currentPage}`);
+      console.log(`   �🔄 Duplicates skipped: ${duplicateCount}`);
+      console.log(`   ❌ Leads rejected (missing phone/email): ${rejectedCount}`);
+      console.log(`   🌐 Total websites scraped: ${totalScrapedCount}`);
+      console.log(`   📈 Valid lead rate: ${totalScrapedCount > 0 ? ((leads.length / totalScrapedCount) * 100).toFixed(1) : 0}%`);
+      console.log(`   📧 All returned leads have both phone numbers and email addresses`);
+      console.log(`   🔗 Unique URLs processed: ${allProcessedUrls.size}`);
+      console.log(`   🔄 Comprehensive pagination: Next Button + Load More + Infinite Scroll + Alternative Search`);
 
-      return leads;
-
-    } catch (err) {
-      console.error(`❌ Scraper Error: ${err.message}`);
-      return [];
-    } finally {
+      // ✅ FIXED: Only close browser after pagination is complete
       if (driver) {
         try {
           await driver.quit();
-          console.log('🛑 Chrome browser closed');
+          console.log('🛑 Chrome browser closed after pagination complete');
         } catch (e) {
           console.error(`❌ Error closing driver: ${e.message}`);
         }
       }
 
-      // Clean up temporary directory in production
-      if (isProduction && tmpDir) {
+      return leads;
+
+    } catch (err) {
+      console.error(`❌ Scraper Error: ${err.message}`);
+
+      // Close browser on error
+      if (driver) {
         try {
-          const fs = await import('fs');
-          if (fs.existsSync && fs.existsSync(tmpDir)) {
-            fs.rmSync(tmpDir, { recursive: true, force: true });
-            console.log(`🧹 Cleaned up temporary directory: ${tmpDir}`);
-          }
+          await driver.quit();
+          console.log('🛑 Chrome browser closed due to error');
         } catch (e) {
-          console.log(`⚠️ Could not clean up temporary directory: ${e.message}`);
+          console.error(`❌ Error closing driver: ${e.message}`);
         }
       }
+
+      return [];
     }
 
   } catch (mainError) {
     console.error(`❌ MAIN SCRAPER ERROR: ${mainError.message}`);
     return [];
+  }
+};
+
+// Export function with progress callback support
+export const scrapeLeads = async (prompt, maxResults = 50, progressCallback = null) => {
+  console.log(`\n🔍 SCRAPER STARTED WITH PROGRESS - Prompt: "${prompt}"`);
+
+  if (progressCallback) {
+    progressCallback({
+      message: 'Initializing scraper (validating phone & email)...',
+      percent: 5,
+      leadsFound: 0
+    });
+  }
+
+  try {
+    const { count, category, location } = parsePrompt(prompt);
+    console.log(`🎯 Target: ${count} ${category} in ${location} (with phone & email)`);
+
+    if (progressCallback) {
+      progressCallback({
+        message: `Searching for ${category} in ${location} (phone & email required)...`,
+        percent: 10,
+        leadsFound: 0
+      });
+    }
+
+    // Use the existing scrapeLeadsWithSelenium function with progress callback
+    const leads = await scrapeLeadsWithSelenium(prompt, progressCallback);
+
+    if (progressCallback) {
+      progressCallback({
+        message: `Scraping completed! Found ${leads.length} leads with phone & email`,
+        percent: 100,
+        leadsFound: leads.length
+      });
+    }
+
+    return { leads, count: leads.length };
+
+  } catch (error) {
+    console.error(`❌ SCRAPER WITH PROGRESS ERROR: ${error.message}`);
+    if (progressCallback) {
+      progressCallback({
+        message: 'Scraping failed',
+        percent: 0,
+        leadsFound: 0
+      });
+    }
+    throw error;
   }
 };
