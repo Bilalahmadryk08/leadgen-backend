@@ -144,13 +144,24 @@ export const scrapeLeads = async (req, res) => {
 export const generateLeadsStream = async (req, res) => {
   const { source, prompt, maxResults = 50 } = req.query;
 
-  // Set up Server-Sent Events
+  // Set up Server-Sent Events with proper CORS
+  const allowedOrigins = [
+    'http://localhost:5173',
+    'http://localhost:3000',
+    'https://leadgen-frontend-git-main-saudkhanbpks-projects.vercel.app'
+  ];
+
+  const origin = req.headers.origin;
+  const allowOrigin = allowedOrigins.includes(origin) ? origin : allowedOrigins[0];
+
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
     'Connection': 'keep-alive',
-    'Access-Control-Allow-Origin': `${process.env.Vite_CLIENT_URL}`,
-    'Access-Control-Allow-Credentials': 'true'
+    'Access-Control-Allow-Origin': allowOrigin,
+    'Access-Control-Allow-Credentials': 'true',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization'
   });
 
   const sendProgress = (type, data) => {
