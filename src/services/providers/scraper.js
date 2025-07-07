@@ -101,32 +101,33 @@ const detectCaptcha = async (driver) => {
 };
 
 const parsePrompt = (prompt) => {
+  // First, extract the lead count using a clean regex that looks for "generate X"
+  const countMatch = prompt.match(/generate\s+(\d+)/i);
+  const count = countMatch ? parseInt(countMatch[1], 10) : 50; // Default to 50 only if no number found
+
+  console.log(`🔢 Extracted lead count: ${count} from prompt: "${prompt}"`);
+
+  // Then parse the category and location using simplified patterns
   const patterns = [
-    /generate\s+(\d+)\s+leads\s+of\s+(.+?)\s+in\s+(.+)/i,
-    /generate\s+(\d+)\s+(.+?)\s+leads\s+in\s+(.+)/i,
-    /(\d+)\s+leads\s+of\s+(.+?)\s+in\s+(.+)/i,
-    /(\d+)\s+(.+?)\s+leads\s+in\s+(.+)/i,
-    /find\s+(\d+)\s+(.+?)\s+in\s+(.+)/i,
+    /generate\s+\d+\s+leads\s+of\s+(.+?)\s+in\s+(.+)/i,
+    /generate\s+\d+\s+(.+?)\s+leads\s+in\s+(.+)/i,
+    /generate\s+\d+\s+(.+?)\s+in\s+(.+)/i,
+    /\d+\s+leads\s+of\s+(.+?)\s+in\s+(.+)/i,
+    /\d+\s+(.+?)\s+leads\s+in\s+(.+)/i,
+    /find\s+\d+\s+(.+?)\s+in\s+(.+)/i,
     /(.+?)\s+in\s+(.+)/i
   ];
 
   for (const pattern of patterns) {
     const match = prompt.match(pattern);
     if (match) {
-      let count, category, location;
-      if (match.length === 4) {
-        count = parseInt(match[1]);
-        category = match[2].trim();
-        location = match[3].trim();
-      } else if (match.length === 3) {
-        count = 50;
-        category = match[1].trim();
-        location = match[2].trim();
-      }
+      const category = match[1].trim();
+      const location = match[2].trim();
       return { count, category, location };
     }
   }
-  throw new Error('❌ Invalid prompt. Use: "generate 50 leads of restaurants in California"');
+
+  throw new Error('❌ Invalid prompt. Use: "generate 10 leads of restaurants in California"');
 };
 
 const scrapeWebsite = async (driver, url, category) => {
@@ -502,8 +503,18 @@ export const scrapeLeadsWithSelenium = async (prompt, progressCallback = null) =
     const leads = [];
 
     try {
-      const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(`${category} ${location} contact phone number`)}`;
-      console.log(`🔍 Searching: ${searchUrl}`);
+      // Log the original prompt and parsed keywords
+      console.log(`📥 Prompt received: ${prompt}`);
+      console.log(`🔍 Parsed keywords: ${category} in ${location}`);
+
+      // Build the search query
+      const searchQuery = `${category} in ${location}`;
+      const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(searchQuery)}`;
+
+      // Log the final search URL before navigation
+      console.log(`🌐 Final search URL: ${searchUrl}`);
+      console.log(`🔍 Google search query: ${searchUrl}`);
+
       await driver.get(searchUrl);
 
       // Check for CAPTCHA immediately after page load
@@ -612,6 +623,7 @@ export const scrapeLeadsWithSelenium = async (prompt, progressCallback = null) =
         }
 
         let urls = [];
+        const seenDomains = new Set(); // Track seen domains to avoid duplicates
         console.log(`📊 Processing ${resultEls.length} potential result links`);
 
         for (let el of resultEls) {
@@ -623,15 +635,55 @@ export const scrapeLeadsWithSelenium = async (prompt, progressCallback = null) =
                 !href.includes('facebook.com') &&
                 !href.includes('instagram.com') &&
                 !href.includes('twitter.com')) {
+
+              // Parse URL to get hostname and pathname
+              const url = new URL(href);
+              const hostname = url.hostname.toLowerCase();
+              const pathname = url.pathname.toLowerCase();
+
+              // Skip unwanted domains
+              if (hostname.includes('social-plugins.line.me') ||
+                  hostname.includes('facebook.com') ||
+                  hostname.includes('instagram.com') ||
+                  hostname.includes('twitter.com') ||
+                  hostname.includes('linkedin.com') ||
+                  hostname.includes('youtube.com')) {
+                console.log(`🚫 Skipped social/unwanted domain: ${hostname}`);
+                continue;
+              }
+
+              // Skip unwanted paths
+              if (pathname.includes('/contact') ||
+                  pathname.includes('/ads') ||
+                  pathname.includes('/share') ||
+                  pathname.includes('/about') ||
+                  pathname.includes('/ja/') ||
+                  pathname.includes('/contactus') ||
+                  pathname.includes('/contact-us') ||
+                  pathname.includes('/privacy') ||
+                  pathname.includes('/terms')) {
+                console.log(`🚫 Skipped unwanted path: ${hostname}${pathname}`);
+                continue;
+              }
+
+              // Check if we've already seen this domain
+              if (seenDomains.has(hostname)) {
+                console.log(`� Skipped duplicate domain: ${hostname} (already processed)`);
+                continue;
+              }
+
+              // Add domain to seen set and URL to results
+              seenDomains.add(hostname);
               urls.push(href);
-              console.log(`🔗 Added URL: ${href}`);
+              console.log(`✅ Added unique domain URL: ${href}`);
             }
           } catch (e) {
-            console.log(`⚠️ Error getting href: ${e.message}`);
+            console.log(`⚠️ Error processing URL: ${e.message}`);
           }
         }
 
-        return [...new Set(urls)]; // Return unique URLs
+        console.log(`🎯 Final result: ${urls.length} unique domain URLs from ${seenDomains.size} domains`);
+        return urls; // Return domain-deduplicated URLs
       };
 
       // ✅ NEW: Function to try infinite scroll with safety measures

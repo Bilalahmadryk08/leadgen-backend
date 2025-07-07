@@ -3,6 +3,37 @@ import { google } from 'googleapis';
 
 const router = express.Router();
 
+// Helper function to format leads to HubSpot Contacts Template structure
+const formatLeadsToHubspotTemplate = (leads) => {
+  return leads.map(lead => {
+    // Split name into first and last name
+    const nameParts = (lead.name || '').trim().split(' ');
+    const firstName = nameParts[0] || '';
+    const lastName = nameParts.slice(1).join(' ') || '';
+
+    // Extract city from address or location
+    let city = '';
+    if (lead.address) {
+      // Try to extract city from address (usually after comma)
+      const addressParts = lead.address.split(',');
+      city = addressParts.length > 1 ? addressParts[addressParts.length - 2].trim() : lead.address.trim();
+    } else if (lead.location) {
+      city = lead.location;
+    }
+
+    return {
+      'First Name': firstName,
+      'Last Name': lastName,
+      'Email Address': lead.email || '',
+      'Phone Number': lead.phone || '',
+      'City': city
+      // 'Lifecycle Stage': 'Lead',
+      // 'Contact Owner': '',
+      // 'Favorite Ice Cream Flavor': ''
+    };
+  });
+};
+
 // Route to list existing Google Sheets
 router.post('/google-sheets/list', async (req, res) => {
   const { token } = req.body;
@@ -56,13 +87,13 @@ router.post('/google-sheets', async (req, res) => {
       });
       targetSheetId = newFile.data.id;
 
-      // Add headers to the new sheet
+      // Add HubSpot template headers to the new sheet
       await sheets.spreadsheets.values.update({
         spreadsheetId: targetSheetId,
-        range: 'Sheet1!A1:F1',
+        range: 'Sheet1!A1:E1',
         valueInputOption: 'RAW',
         resource: {
-          values: [['Name', 'Phone', 'Email', 'Address', 'Company', 'Website']]
+          values: [['First Name', 'Last Name', 'Email Address', 'Phone Number', 'City']]
         },
       });
     } else {
@@ -70,17 +101,17 @@ router.post('/google-sheets', async (req, res) => {
       try {
         const headerResponse = await sheets.spreadsheets.values.get({
           spreadsheetId: targetSheetId,
-          range: 'Sheet1!A1:F1',
+          range: 'Sheet1!A1:E1',
         });
 
         if (!headerResponse.data.values || headerResponse.data.values.length === 0) {
-          // Add headers if they don't exist
+          // Add HubSpot template headers if they don't exist
           await sheets.spreadsheets.values.update({
             spreadsheetId: targetSheetId,
-            range: 'Sheet1!A1:F1',
+            range: 'Sheet1!A1:E1',
             valueInputOption: 'RAW',
             resource: {
-              values: [['Name', 'Phone', 'Email', 'Address', 'Company', 'Website']]
+              values: [['First Name', 'Last Name', 'Email Address', 'Phone Number', 'City']]
             },
           });
         }
@@ -89,20 +120,25 @@ router.post('/google-sheets', async (req, res) => {
       }
     }
 
-    // Prepare the data with all lead fields
-    const values = leads.map(lead => [
-      lead.name || '',
-      lead.phone || '',
-      lead.email || '',
-      lead.address || '',
-      lead.company || '',
-      lead.website || ''
+    // Format leads to HubSpot template structure
+    const formattedLeads = formatLeadsToHubspotTemplate(leads);
+
+    // Prepare the data with HubSpot template fields
+    const values = formattedLeads.map(lead => [
+      lead['First Name'],
+      lead['Last Name'],
+      lead['Email Address'],
+      lead['Phone Number'],
+      lead['City']
+      // lead['Lifecycle Stage'],
+      // lead['Contact Owner'],
+      // lead['Favorite Ice Cream Flavor']
     ]);
 
     // Append the data to the sheet
     await sheets.spreadsheets.values.append({
       spreadsheetId: targetSheetId,
-      range: 'Sheet1!A:F',
+      range: 'Sheet1!A:E',
       valueInputOption: 'RAW',
       resource: { values },
     });
