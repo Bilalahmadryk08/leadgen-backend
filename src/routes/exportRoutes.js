@@ -127,7 +127,6 @@ router.post('/google-sheets', async (req, res) => {
       }
     }
 
-<<<<<<< HEAD
     // Check if leads are already formatted (from frontend) or need formatting
     let formattedLeads;
 
@@ -168,10 +167,6 @@ router.post('/google-sheets', async (req, res) => {
     }
 
     console.log('📊 Sample formatted lead:', formattedLeads[0]);
-=======
-    // Format leads to HubSpot template structure
-    const formattedLeads = formatLeadsToHubspotTemplate(leads);
->>>>>>> 90a521c111178f7baca2eafa510477832b705cb0
 
     // Prepare the data with HubSpot template fields
     const values = formattedLeads.map(lead => [
