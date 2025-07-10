@@ -113,10 +113,6 @@ router.post('/google-sheets', async (req, res) => {
           range: 'Sheet1!A1:E1',
         });
         if (!headerResponse.data.values || headerResponse.data.values.length === 0) {
-<<<<<<< HEAD
-=======
-          // Add HubSpot template headers if they don't exist
->>>>>>> 90a521c111178f7baca2eafa510477832b705cb0
           await sheets.spreadsheets.values.update({
             spreadsheetId: targetSheetId,
             range: 'Sheet1!A1:E1',
