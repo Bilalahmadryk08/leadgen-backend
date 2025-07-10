@@ -8,6 +8,7 @@ const router = express.Router();
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_SECRET= process.env.GOOGLE_CLIENT_SECRET;
 const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI;
+const FRONTEND_URL = process.env.VITE_CLIENT_URL || 'http://localhost:5173';
 const oauth2Client = new google.auth.OAuth2(
   GOOGLE_CLIENT_ID, 
   GOOGLE_CLIENT_SECRET,
@@ -27,7 +28,7 @@ router.get('/google', (req, res) => {
       'email',
       'profile',
     ],
-    redirect_uri: process.env.GOOGLE_REDIRECT_URI,
+    redirect_uri: GOOGLE_REDIRECT_URI,
     state: state // Pass the state parameter through
   });
   res.redirect(authUrl);
@@ -47,8 +48,8 @@ router.get('/google/callback', async (req, res) => {
       expires_at: tokens.expiry_date
     };
 
-    // ✅ Redirect back to your frontend with complete auth data
-    const redirectUrl = `{process.env.GOOGLE_REDIRECT_URI}/google-auth-success?authData=${encodeURIComponent(JSON.stringify(authData))}`;
+    // Redirect to frontend, not backend
+    const redirectUrl = `${FRONTEND_URL}/google-auth-success?authData=${encodeURIComponent(JSON.stringify(authData))}`;
     res.redirect(redirectUrl);
   } catch (err) {
     console.error('OAuth callback error:', err);

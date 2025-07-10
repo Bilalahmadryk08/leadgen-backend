@@ -5,6 +5,8 @@ import leadRoutes from "./routes/leadRoutes.js";
 import exportRoutes from "./routes/exportRoutes.js";
 import authRoutes from "./routes/authRoutes.js";
 import captchaRoutes from "./routes/captchaRoutes.js";
+import emailRoutes from "./routes/emailRoutes.js";
+import googleSheetRoutes from "./routes/googleSheet.js";
 
 dotenv.config();
 
@@ -36,11 +38,14 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
 app.use(express.json());
+app.use('/uploads', express.static('uploads'));
 
 app.use("/api/leads", leadRoutes);
 app.use("/api/export", exportRoutes);
 app.use("/api/auth", authRoutes); // <-- updated usage
 app.use("/api/captcha", captchaRoutes);
+app.use('/api/email', emailRoutes);
+app.use('/api/sheets', googleSheetRoutes);
 
 app.get("/", (req, res) => {
   res.send("Lead Generation API is running 🚀");

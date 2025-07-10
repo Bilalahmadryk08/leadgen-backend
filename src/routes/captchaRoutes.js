@@ -9,29 +9,35 @@ const activeSessions = new Map();
 // Route to handle CAPTCHA solving
 router.post('/solve', async (req, res) => {
   try {
-    const { sessionId, captchaToken } = req.body;
-    
-    console.log(`🔓 CAPTCHA solve request received:`);
-    console.log(`   Session ID: ${sessionId}`);
-    console.log(`   Token: ${captchaToken ? 'Present' : 'Missing'}`);
+    const { sessionId, token, captchaToken, prompt } = req.body;
 
-    if (!sessionId || !captchaToken) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'sessionId and captchaToken are required' 
+    // Support both new format (token) and legacy format (captchaToken)
+    const finalToken = token || captchaToken;
+
+    console.log(`[CAPTCHA] Solve request received:`);
+    console.log(`   Session ID: ${sessionId}`);
+    console.log(`   Token: ${finalToken ? 'Present' : 'Missing'}`);
+    console.log(`   Prompt: ${prompt || 'Not provided'}`);
+
+    if (!sessionId || !finalToken) {
+      return res.status(400).json({
+        success: false,
+        error: 'sessionId and token are required'
       });
     }
 
     // Get the active session
     const session = activeSessions.get(sessionId);
     if (!session) {
-      return res.status(404).json({ 
-        success: false, 
-        error: 'Session not found or expired' 
+      console.log(`[CAPTCHA] Session not found: ${sessionId}`);
+      return res.status(404).json({
+        success: false,
+        error: 'Session not found or expired'
       });
     }
 
-    console.log(`✅ Session found, injecting CAPTCHA token...`);
+    console.log(`[CAPTCHA] Solved token received for session ${sessionId}`);
+    console.log(`[CAPTCHA] Injecting CAPTCHA token...`);
 
     try {
       // Inject the CAPTCHA token into the browser using the correct method
@@ -39,8 +45,8 @@ router.post('/solve', async (req, res) => {
         // Method 1: Set the g-recaptcha-response textarea value
         const responseTextarea = document.getElementById('g-recaptcha-response');
         if (responseTextarea) {
-          responseTextarea.innerHTML = '${captchaToken}';
-          responseTextarea.value = '${captchaToken}';
+          responseTextarea.innerHTML = '${finalToken}';
+          responseTextarea.value = '${finalToken}';
           responseTextarea.style.display = 'block';
           console.log('✅ Set g-recaptcha-response textarea');
         }
@@ -48,14 +54,14 @@ router.post('/solve', async (req, res) => {
         // Method 2: Try alternative selectors
         const altTextarea = document.querySelector('textarea[name="g-recaptcha-response"]');
         if (altTextarea) {
-          altTextarea.innerHTML = '${captchaToken}';
-          altTextarea.value = '${captchaToken}';
+          altTextarea.innerHTML = '${finalToken}';
+          altTextarea.value = '${finalToken}';
           altTextarea.style.display = 'block';
           console.log('✅ Set alternative g-recaptcha-response textarea');
         }
 
         // Method 3: Set window.recaptchaToken for manual checking
-        window.recaptchaToken = '${captchaToken}';
+        window.recaptchaToken = '${finalToken}';
         window.captchaSolved = true;
         console.log('✅ Set window.recaptchaToken and window.captchaSolved');
 
@@ -157,6 +163,8 @@ router.get('/status/:sessionId', (req, res) => {
 
 // Export functions to be used by the scraper
 export const createCaptchaSession = (sessionId, driver, resolve, reject, sessionKey = null) => {
+  console.log(`[CAPTCHA] Waiting for solution for session ${sessionId}`);
+
   activeSessions.set(sessionId, {
     driver,
     resolve,
@@ -165,7 +173,7 @@ export const createCaptchaSession = (sessionId, driver, resolve, reject, session
     createdAt: Date.now()
   });
 
-  // Auto-cleanup after 10 minutes
+  // Auto-cleanup after 3 minutes
   setTimeout(() => {
     if (activeSessions.has(sessionId)) {
       console.log(`🧹 Cleaning up expired CAPTCHA session: ${sessionId}`);
@@ -173,7 +181,7 @@ export const createCaptchaSession = (sessionId, driver, resolve, reject, session
       session.reject(new Error('CAPTCHA session expired'));
       activeSessions.delete(sessionId);
     }
-  }, 10 * 60 * 1000); // 10 minutes
+  }, 180000); // 3 minutes (180 seconds)
 };
 
 export const cleanupCaptchaSession = (sessionId) => {
