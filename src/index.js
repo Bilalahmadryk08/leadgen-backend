@@ -17,7 +17,7 @@ const PORT = process.env.PORT || 3001;
 const allowedOrigins = [
   'http://localhost:5173', // Development frontend
   'http://localhost:3000',
-  'https://leadgen-frontend-one.vercel.app/', // Alternative development port
+  'https://leadgen-frontend-one.vercel.app', // Alternative development port
   'https://leadgen-frontend-git-main-saudkhanbpks-projects.vercel.app', // Your Vercel deployment
   // Add your custom domain here if you have one
 ];
