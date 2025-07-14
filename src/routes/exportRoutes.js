@@ -3,37 +3,6 @@ import { google } from 'googleapis';
 
 const router = express.Router();
 
-// Helper function to format leads to HubSpot Contacts Template structure
-const formatLeadsToHubspotTemplate = (leads) => {
-  return leads.map(lead => {
-    // Split name into first and last name
-    const nameParts = (lead.name || '').trim().split(' ');
-    const firstName = nameParts[0] || '';
-    const lastName = nameParts.slice(1).join(' ') || '';
-
-    // Extract city from address or location
-    let city = '';
-    if (lead.address) {
-      // Try to extract city from address (usually after comma)
-      const addressParts = lead.address.split(',');
-      city = addressParts.length > 1 ? addressParts[addressParts.length - 2].trim() : lead.address.trim();
-    } else if (lead.location) {
-      city = lead.location;
-    }
-
-    return {
-      'First Name': firstName,
-      'Last Name': lastName,
-      'Email Address': lead.email || '',
-      'Phone Number': lead.phone || '',
-      'City': city
-      // 'Lifecycle Stage': 'Lead',
-      // 'Contact Owner': '',
-      // 'Favorite Ice Cream Flavor': ''
-    };
-  });
-};
-
 // Route to list existing Google Sheets
 router.post('/google-sheets/list', async (req, res) => {
   const { token } = req.body;

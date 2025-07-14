@@ -36,8 +36,8 @@ router.post('/solve', async (req, res) => {
       });
     }
 
-    console.log(`[CAPTCHA] Solved token received for session ${sessionId}`);
-    console.log(`[CAPTCHA] Injecting CAPTCHA token...`);
+    console.log(`✅ CAPTCHA token received for session ${sessionId}`);
+    console.log(`🔧 Injecting CAPTCHA token into browser...`);
 
     try {
       // Inject the CAPTCHA token into the browser using the correct method
@@ -131,13 +131,18 @@ router.post('/solve', async (req, res) => {
       });
 
     } catch (injectionError) {
-      console.error(`❌ Error injecting CAPTCHA token:`, injectionError);
-      session.reject(new Error(`Failed to inject CAPTCHA token: ${injectionError.message}`));
+      console.error(`💥 Chrome crashed during CAPTCHA injection:`, injectionError.message);
+
+      // Clean up the session immediately
       activeSessions.delete(sessionId);
-      
-      res.status(500).json({ 
-        success: false, 
-        error: 'Failed to inject CAPTCHA token' 
+
+      // Reject the session with a clear error
+      session.reject(new Error(`Chrome crashed during CAPTCHA injection: ${injectionError.message}`));
+
+      res.status(500).json({
+        success: false,
+        error: 'Chrome crashed during CAPTCHA injection',
+        details: injectionError.message
       });
     }
 
@@ -173,13 +178,17 @@ export const createCaptchaSession = (sessionId, driver, resolve, reject, session
     createdAt: Date.now()
   });
 
-  // Auto-cleanup after 3 minutes
+  // Auto-cleanup after 3 minutes with improved error handling
   setTimeout(() => {
     if (activeSessions.has(sessionId)) {
-      console.log(`🧹 Cleaning up expired CAPTCHA session: ${sessionId}`);
+      console.warn(`⚠️ CAPTCHA session expired - no user interaction: ${sessionId}`);
       const session = activeSessions.get(sessionId);
-      session.reject(new Error('CAPTCHA session expired'));
+
+      // Clean up session first
       activeSessions.delete(sessionId);
+
+      // Reject with timeout error
+      session.reject(new Error('CAPTCHA session expired - no user interaction within 3 minutes'));
     }
   }, 180000); // 3 minutes (180 seconds)
 };

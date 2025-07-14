@@ -485,16 +485,22 @@ export const scrapeLeadsWithSelenium = async (prompt, progressCallback = null) =
 
     console.log(`🚀 Setting up Chrome options...`);
     console.log(`🔍 Session key: ${sessionKey}`);
-    console.log(`🤖 Headless mode: ALWAYS ENABLED (CAPTCHA handled in frontend)`);
+    console.log(`🤖 Headless mode: ${isHeadlessAllowed ? 'ENABLED (CAPTCHA previously solved)' : 'DISABLED (First-time CAPTCHA solving)'}`);
 
     const options = new chrome.Options();
     options.addArguments('--no-sandbox');
     options.addArguments('--disable-dev-shm-usage');
-    options.addArguments('--headless'); // Always use headless mode
+
+    // Use headless mode only if CAPTCHA was previously solved for this session type
+    if (isHeadlessAllowed) {
+      options.addArguments('--headless');
+      console.log(`✅ Using headless mode - CAPTCHA previously solved for this session type`);
+    } else {
+      console.log(`🖥️ Using non-headless mode - First-time CAPTCHA solving required`);
+    }
+
     options.addArguments('--disable-blink-features=AutomationControlled');
     options.addArguments('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
-
-    console.log(`✅ Using headless mode - CAPTCHA will be handled in React frontend`);
 
     console.log(`🚀 Building Chrome driver...`);
     const driver = await new Builder().forBrowser('chrome').setChromeOptions(options).build();
